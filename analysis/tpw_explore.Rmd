@@ -1,17 +1,23 @@
 ---
 title: "TPW Data Exploration"
 output: html_notebook
+author: "Guy Lomax"
+date: 2023-03-13
 ---
 
 ```{r setup}
 
+# Analysis
 library(signal)
 library(imputeTS)
 
+# Data management
+library(here)
 library(tidyverse)
 library(lubridate)
 library(sf)
 
+# Visualisation
 library(tmap)
 library(ggthemes)
 
@@ -28,9 +34,11 @@ shapefile containing 7,273 rows (one per sampling event) and a csv containing
 
 ```{r load}
 
-tpw_points <- st_read("raw_data/vector/tpw/Rangeland_Ufuatiliaji_wa_Nyanda_za_Malisho.shp")
-tpw_table <- read_csv("raw_data/csv/tpw/samplemetrics.csv")
-tz <- st_read("raw_data/vector/natural_earth/ne_110m_admin_0_countries_fixed.shp") %>%
+tpw_points <- st_read(here("data", "raw", "vector", "tpw",
+                           "Rangeland_Ufuatiliaji_wa_Nyanda_za_Malisho.shp"))
+tpw_table <- read_csv(here("data", "raw", "csv", "tpw", "samplemetrics.csv"))
+tz <- st_read(here("data", "raw", "vector", "natural_earth",
+                   "ne_110m_admin_0_countries_fixed.shp")) %>%
   filter(NAME == "Tanzania") %>%
   select(NAME)
 
@@ -45,7 +53,6 @@ Join points to table, summarise and clean
 tpw_joined <- tpw_points %>%
   mutate(globalid = toupper(globalid)) %>%
   left_join(tpw_table, by = c("globalid" = "parentglobalid"))
-
 
 # n_distinct(tpw_points$globalid)
 # n_distinct(tpw_table$parentglobalid)
@@ -107,7 +114,7 @@ tpw_locations_fixed <- tpw_clean %>%
 # Write locations to shapefile for extraction
 
 # st_write(tpw_locations,
-#          "processed_data/vector/tpw/tpw_locations.shp",
+#          here("data", "processed", "vector", "tpw", "tpw_locations.shp"),
 #          delete_dsn = T)
 
 ```
@@ -117,7 +124,8 @@ for each plot extracted from Google Earth Engine and explore time series.
 
 ```{r ts_eda}
 
-tpw_bands <- read_csv("processed_data/csv/tpw/tpwMonthlyValues.csv") %>%
+tpw_bands <- read_csv(here("processed_data", "csv", "tpw",
+                           "tpwMonthlyValues.csv")) %>%
   select(-"system:index", -".geo") %>%
   rename(blue = B2,
          green = B3,
@@ -453,13 +461,13 @@ p4 <- tpw_plot %>%
 
 p1; p2; p3; p4
 
-ggsave("figures/ndvi_p1.jpg", p1,
+ggsave(here("results", "figures", "ndvi_p1.jpg"), p1,
        width = 24, height = 16, units = "cm")
-ggsave("figures/ndvi_p2.jpg", p2,
+ggsave(here("results", "figures", "ndvi_p2.jpg"), p2,
        width = 24, height = 16, units = "cm")
-ggsave("figures/ndvi_p3.jpg", p3,
+ggsave(here("results", "figures", "ndvi_p3.jpg"), p3,
        width = 24, height = 16, units = "cm")
-ggsave("figures/ndvi_p4_simple.jpg", p4,
+ggsave(here("results", "figures", "ndvi_p4_simple.jpg"), p4,
        width = 24, height = 16, units = "cm")
 
 # Plot with NDVI envelope and rainfall
@@ -470,7 +478,7 @@ p5 <- ggplot(tpw_plot, aes(x = imgDate)) +
   labs(x = "Date", y = "NDVI") +
   theme_clean()
 
-ggsave("figures/ndvi_p5.jpg", p5,
+ggsave(here("results", "figures", "ndvi_p5.jpg"), p5,
        width = 24, height = 16, units = "cm")
 
 ```
