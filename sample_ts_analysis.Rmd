@@ -1,0 +1,253 @@
+---
+title: "Time series analysis"
+author: "Guy Lomax"
+date: 2022-08-29
+output: html_notebook
+---
+
+This analysis constructs simple time series regression models for the
+relationship between rangeland GPP and precipitation.
+
+```{r setup}
+
+options(repos = c(CRAN = "https://cran.rstudio.org"))
+.libPaths("C:/Program Files/Microsoft/R Open/R-4.0.2/library")
+
+library(tidyverse)
+library(lubridate)
+library(xts)
+library(zoo)
+library(modelr)
+
+
+```
+
+Load datasets (time series for 100 sampled points in Kenyan rangelands):
+
+```{r load_data}
+
+data <- read_csv("raw_data/csv/study_area_points_ts.csv") %>%
+  mutate(id = paste0("0x", substring(`system:index`, 12)) %>% strtoi(),
+         start = as_datetime(start / 1000),
+         end = as_datetime(end / 1000)) %>%
+  select(id, start, end, GPP, precipitation, LC_Type1) %>%
+  rename(LC = LC_Type1) %>%
+  arrange(start) %>%
+  arrange(id)
+
+head(data)
+
+# Assign mid-point of time window as date
+# Add period-of-year variable
+
+
+data_mid <- data %>%
+  mutate(midpoint = start + as.duration(interval(start, end) / 2),
+         year = year(midpoint),
+         week_num = (yday(end) - 1) / 8)
+
+
+```
+
+Exploration of data
+
+```{r eda}
+
+# Normalise ppt and GPP to mean values and plot
+
+test_plot <- data_mid %>%
+  group_by(id) %>%
+  mutate(precipitation = precipitation / mean(precipitation[precipitation != 0]),
+         GPP = GPP / mean(GPP)) %>%
+  ungroup() %>%
+  filter(id < 6) %>%
+  pivot_longer(cols = c(GPP, precipitation),
+               names_to = "var",
+               values_to = "value") %>%
+  mutate(var = factor(var, levels = c("precipitation", "GPP"))) %>%
+  ggplot() +
+  geom_line(aes(x = midpoint, y = value, colour = var)) +
+  facet_wrap(~id, nrow = 2, ncol = 3) +
+  theme_bw()
+
+test_plot
+
+point0 <- filter(data_mid, id == 2)
+
+point0_ts <- point0 %>%
+  select(GPP, precipitation) %>%
+  ts(frequency = 46, start = c(2002, 1))
+
+gpp_ts <- ts(point0$GPP, frequency = 46, start = c(2002, 1))
+
+precip_ts <- ts(point0$precipitation, frequency = 46, start = c(2002, 1))
+
+plot(window(point0_ts, 2012, 2020))
+plot(gpp_ts)
+plot(stl(gpp_ts, s.window = "periodic"))
+plot(stl(precip_ts, s.window = "periodic"))
+
+# Autocorrelation in datasets
+acf(gpp_ts)
+pacf(gpp_ts)
+
+acf(precip_ts)
+pacf(precip_ts)
+
+
+```
+
+GPP appears to have a stronger autocorrelation and slower variation than PPT,
+reflecting the fact it is a slower-responding variable.
+Visually, GPP seems to respond more to the cumulative amount of rainfall than
+the magnitude of any spike, and to be more sensitive to rainfall after periods
+of low rainfall than after periods of high rainfall (intuitive!). For example,
+in late 2006, a small amount of rainfall is correlated with a significant
+increase in GPP, while simi   lar rainfall in mid-2006 occurs at a time of higher,
+but declining, GPP. This suggests a few things:
+1. Cumulative rainfall over some characteristic timescale may be more relevant
+than individual rainfall.
+2. The GPP-precipitation relationship is nonlinear, but depends on (i) the amount
+of rainfall and (ii) the state of the vegetation/GPP when that rainfall occurs.
+3. The response to rainfall varies depending on the timing in the season.
+Rainfall occurring after a dry period leads to a strong response, while rainfall
+occurring late in the season when GPP is already declining shows a weaker response.
+4. There isn't an obvious pattern where GPP increase at the start of a season is
+faster than GPP decrease at the end, or vice versa. Instead, there seem to be
+some years when GPP increases slowly and declines rapidly (2007) and some where
+it increases rapidly and declines slowly (2008). Could this be a lag effect?
+
+Point 2 also seems to have an unusual relationship, with large GPP responses to
+small rainfall totals in some years (e.g., 2008) and small responses to large
+events in others (e.g., 2009). Could this be a memory effect from previous years?
+
+Here's a simple first attempt to fit a linear model including an autoregressive
+component.
+
+```{r lag_lm}
+
+data_nest <- data_mid %>%
+  group_by(id) %>%
+  nest()
+
+# Fit linear models to each data point
+# Define linear model function (easy to edit formula)
+lin_mod <- function(df) {
+  mod <- lm(GPP ~ lag(GPP) + precipitation + lag(precipitation),
+            data = df)
+  mod
+}
+
+# Map function across nested data frames for each data point
+data_lm <- data_nest %>%
+  summarise(mod = map(data, lin_mod),
+            preds = map2(data, mod, add_predictions),
+            resids = map2(data, mod, add_residuals))
+
+lm_resids <- unnest(data_lm, resids)
+
+lm_resids %>%
+  filter(id < 9) %>%
+  group_by(id) %>%
+  mutate(frac_resid = resid / mean(GPP)) %>%
+  ungroup() %>%
+  ggplot(aes(x = midpoint, y = frac_resid)) +
+  geom_line(size = 0.2) +
+  facet_wrap(~id) +
+  ylim(-2, 2)
+
+lm_preds <- unnest(data_lm, preds)
+
+lm_preds %>%
+  filter(id < 9) %>%
+  select(id, midpoint, GPP, precipitation, pred) %>%
+  pivot_longer(c(GPP, pred), names_to = "var", values_to = "value") %>%
+  ggplot(aes(x = midpoint, y = value, colour = var)) +
+  geom_line(size = 0.4) +
+  facet_wrap(~id)
+
+# Model performance
+
+lm_performance <- data_lm %>%
+  mutate(glance = map(mod, broom::glance)) %>%
+  select(-preds, -resids) %>%
+  unnest(glance)
+
+# Density plots of model performance metrics
+lm_performance %>%
+  ggplot(aes(x = adj.r.squared)) +
+  geom_density(fill = "darkgreen", alpha = 0.5) +
+  scale_x_continuous(breaks = seq(0, 1, 0.1), limits = c(0,1)) +
+  labs(title = "Adjusted R-squared values for linear models")
+
+# Extract coefficient values
+lm_coefficients <- data_lm %>%
+  select(id, mod) %>%
+  mutate(coef = map(mod, broom::tidy)) %>%
+  unnest(coef)
+
+# Plot density plot of coefficient values
+
+lm_coefficients %>%
+  filter(term != "(Intercept)") %>%
+  ggplot(aes(x = estimate, fill = term)) +
+  geom_density(position = "identity", alpha = 0.5) +
+  labs(title = "Coefficient values for linear models")
+
+```
+
+At first glance, the simple linear models appear to predict actual GPP extremely
+closely. However, much of this reflects the strong autocorrelation on the short
+time steps considered in this dataset. I should try fitting a GAMM.
+
+```{r gamm}
+
+gam_mod <- function(df) {
+  mod <- gamm(GPP ~ s(precipitation) + s(lag(precipitation)),
+            data = df,
+            correlation = corCAR1(form = ~midpoint),
+            family = Gamma(link = "log"))
+  mod
+}
+# BELOW TAKES FOREVER. TRY WITH ONE POINT FIRST!
+# data_gam <- data_nest %>%
+#   summarise(mod = map(data, gam_mod),
+#             preds = map2(data, mod, add_predictions),
+#             resids = map2(data, mod, add_residuals))
+
+test <- data_nest$data[[1]]
+
+test_gam <- gam_mod(test)
+gam_preds <- predict(test_gam$gam)
+
+test$preds <- c(0, gam_preds)
+
+test %>%
+  pivot_longer(c(GPP, preds), names_to = "var", values_to = "value") %>%
+  ggplot(aes(x = midpoint, y = value, colour = var)) +
+  geom_line(size = 0.5)
+
+gam_resids <- unnest(data_gam, resids)
+
+gam_resids %>%
+  filter(id < 9) %>%
+  group_by(id) %>%
+  mutate(frac_resid = resid / mean(GPP)) %>%
+  ungroup() %>%
+  ggplot(aes(x = midpoint, y = frac_resid)) +
+  geom_line(size = 0.2) +
+  facet_wrap(~id) +
+  ylim(-2, 2)
+
+gam_preds <- unnest(data_gam, preds)
+
+gam_preds %>%
+  filter(id < 9) %>%
+  select(id, midpoint, GPP, precipitation, pred) %>%
+  pivot_longer(c(GPP, pred), names_to = "var", values_to = "value") %>%
+  ggplot(aes(x = midpoint, y = value, colour = var)) +
+  geom_line(size = 0.4) +
+  facet_wrap(~id)
+
+```
+

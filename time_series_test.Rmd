@@ -1,0 +1,217 @@
+---
+title: "TPW Data Exploration"
+output: html_notebook
+---
+
+```{r setup}
+
+library(signal)
+library(tidyverse)
+library(lubridate)
+library(sf)
+library(tmap)
+library(imputeTS)
+library(ggthemes)
+
+
+```
+
+Load data.
+
+Original data were in the form of a nested layer, with each point
+(sampling event) accompanied by a nested table of 20 rows, one for every 5 m
+along the 100 m N-S transect. Data were extracted as two separate files: a
+shapefile containing 7,273 rows (one per sampling event) and a csv containing
+130,102 rows (20 per sampling event or fewer in some cases).
+
+```{r load}
+
+sample_ts <- read_csv("processed_data/csv/pointsTSValues.csv")
+
+```
+
+Join with Sentinel 2 band and VI values and CHIRPS monthly precipitation
+for each plot extracted from Google Earth Engine and explore time series.
+
+```{r ts_eda}
+
+ts_bands <- sample_ts %>%
+  select(-".geo") %>%
+  rename(id = `system:index`,
+         blue = B2,
+         green = B3,
+         red = B4,
+         ir = B8,
+         lc = Map) %>%
+  mutate(id = unlist(map(id, function(str) {substring(str, 20, 20)})))
+
+
+# Explore a few time series
+# Select a sample of n random plots
+
+
+cols_to_pivot <- c("msavi", "ndvi", "precipitation")
+
+ts_bands %>%
+  ggplot(aes(x = imgDate, y = ndvi, colour = id)) +
+  geom_line() +
+  theme_bw()
+
+
+```
+
+
+Simple linear interpolation:
+
+```{r lin_interp}
+
+ts_interp <- ts_bands %>%
+  filter(id != 3) %>%
+  group_by(id) %>%
+  arrange(midpoint) %>%
+  mutate(ndvi_int = na_interpolation(ndvi))
+
+
+# Apply Savitzky-Golay filter to smooth signal
+
+
+ts_smoothed <- ts_interp %>%
+  group_by(id) %>%
+  mutate(ndvi_filtered = sgolayfilt(ndvi_int, p = 2, n = 11),
+         precip_filtered = sgolayfilt(precipitation, p = 2, n = 15))
+
+# Create 1/0 marker for whether biweekly rainfall is above long-term mean
+
+labels = c("Trees", "Shrubs", "Grassland", "More grassland", "Bare Soil")
+
+ts_seasonal <- ts_smoothed %>%
+  group_by(id) %>%
+  mutate(season = precipitation / max(precipitation),
+         type = labels[as.numeric(id) + 1])
+
+ts_seasonal %>%
+  select(-ndvi) %>%
+  pivot_longer(cols = c("ndvi_int", "ndvi_filtered"), names_to = "var", values_to = "ndvi") %>%
+  ggplot(aes(x = midpoint)) +
+  geom_line(aes(y = ndvi, linetype = var)) +
+  geom_area(aes(y = as.numeric(season)), fill = "light blue") +
+  facet_wrap(~type) +
+  theme_bw()
+
+p1 <- ts_seasonal %>%
+  ggplot(aes(x = midpoint)) +
+  geom_col(aes(y = as.numeric(season)), colour = "white", fill = "light blue") +
+  geom_line(aes(y = ndvi_filtered), colour = "dark green") +
+  # geom_line(aes(y = ndvi_int), linetype = "dashed") +
+  facet_wrap(~type) +
+  theme_clean() +
+  labs(y = "NDVI", x = "Date")
+
+ggsave("figures/veg_time_series.jpg", p1,
+       width = 24, height = 16, units = "cm")
+
+```
+
+And again with iterative smoother:
+
+```{r sg_iterative}
+
+labels = c("Trees", "Shrubs", "Grassland", "More grassland", "Bare Soil")
+
+ts_int <- ts_bands %>%
+  filter(id != 3) %>%
+  group_by(id) %>%
+  arrange(imgDate) %>%
+  mutate(ndvi_spike = (lead(ndvi) - ndvi > 0.1),
+         ndvi = na_if(ndvi, (ndvi_spike * ndvi)),
+         ndvi_int = na_interpolation(ndvi),
+         type = labels[as.numeric(id) + 1]) %>%
+  select(-ndvi_spike)
+         
+
+# Apply Savitzky-Golay filter to smooth signal
+# For now, use m = 40-60 days (i.e., 8-12 images) and d = 3
+# Will go back and code up internal optimisation of these values later
+
+# sg_params <- tibble(p = rep(2:4, 7),
+#                     m = rep(8:14, each = 3))
+# 
+# # Find optimal smoothing values for each time series
+# find_least_error <- function(ts) {
+#   # Calculate sum of squared errors for each combination of parameters
+#   sse <- numeric(length = nrow(sg_params))
+#   
+#   for (i in seq_len(nrow(sg_params))) {
+#     p <- sg_params$p[i]
+#     m <- sg_params$m[i]
+#     
+#     new_ts <- sgolayfilt(ts, p = p, n = 2 * m + 1)
+#     
+#     sse[i] <- sum((ts - new_ts) ^ 2)
+#   }
+#   
+#   # Choose iteration which has minimum sse
+#   opt <- which.min(sse)
+#   opt
+# }
+
+# tpw_sg1_opt <- tpw_all_int %>%
+#   group_by(plot_id) %>%
+#   mutate(opt = find_least_error(ndvi_int))
+
+ts_sg1 <- ts_int %>%
+  group_by(id) %>%
+  mutate(ndvi_filtered = sgolayfilt(ndvi_int, p = 3, n = 25))
+
+# Assign weights to NDVI values in original (interpolated) series based on
+# whether they fall above or below the trend curve for that TS.
+
+ts_weights <- ts_sg1 %>%
+  mutate(dist = ndvi_filtered - ndvi_int,
+         max_dist = max(dist),
+         weight = ifelse(dist > 0, 1 - (dist / max_dist), 1))
+
+# Iterative approach to upper ndvi envelope
+# Generate new time series by replacing "noisy" NDVI values with filtered ones
+# Second, shorter-period SG filter
+
+iterative_fit <- function(ndvi_1, ndvi_0, weight) {
+  
+  initial_fit <- 100
+  new_fit <- sum(abs(ndvi_1 - ndvi_0) * weight)
+  ndvi_new <- ndvi_1
+
+  while(initial_fit > new_fit) {
+    initial_fit <- new_fit
+    
+    ndvi_new <- ifelse(ndvi_new >= ndvi_0, ndvi_new, ndvi_0) %>%
+    sgolayfilt(p = 4, n = 21)
+  
+  new_fit <- sum(abs(ndvi_new - ndvi_0) * weight)
+  }
+  ndvi_new
+}
+
+# Iterate to get final time series
+
+ts_final <- ts_weights %>%
+  mutate(ndvi_new = iterative_fit(ndvi_filtered, ndvi_int, weight))
+
+# Plot
+max_precip = max(ts_final$precipitation)
+
+p1 <- ts_final %>%
+  mutate(type = factor(type, levels = c("Bare Soil", "Grassland", "Trees", "Shrubs"))) %>%
+  ggplot(aes(x = imgDate)) +
+  geom_col(aes(y = precipitation / max_precip), fill = "light blue") +
+  geom_line(aes(y = ndvi_new), colour = "brown") +
+  # geom_line(aes(y = ndvi_int), linetype = "dashed") +
+  facet_wrap(~type) +
+  theme_clean() +
+  labs(y = "NDVI", x = "Date")
+
+ggsave("figures/land_cover_ndvi.jpg", p1,
+       width = 24, height = 16, units = "cm")
+
+```
+
