@@ -18,9 +18,7 @@ library(lubridate)
 library(sf)
 
 # Visualisation
-library(tmap)
 library(ggthemes)
-
 
 ```
 
@@ -124,7 +122,7 @@ for each plot extracted from Google Earth Engine and explore time series.
 
 ```{r ts_eda}
 
-tpw_bands <- read_csv(here("processed_data", "csv", "tpw",
+tpw_bands <- read_csv(here("data", "processed", "csv", "tpw",
                            "tpwMonthlyValues.csv")) %>%
   select(-"system:index", -".geo") %>%
   rename(blue = B2,
@@ -179,7 +177,8 @@ Explore twice-monthly time series:
 
 ```{r biweekly_ts}
 
-tpw_biweekly <- read_csv("processed_data/csv/tpw/tpwTSValues.csv") %>%
+tpw_biweekly <- read_csv(here("data", "processed", "csv", "tpw",
+                              "tpwTSValues.csv")) %>%
   select(-"system:index", -".geo") %>%
   rename(blue = B2,
          green = B3,
@@ -233,7 +232,8 @@ Let's first look at data taking all S2 images (not aggregated monthly/biweekly):
 
 ```{r full_ts}
 
-tpw_ts_all <- read_csv("processed_data/csv/tpw/tpwTSValues_all.csv") %>%
+tpw_ts_all <- read_csv(here("data", "processed", "csv", "tpw",
+                            "tpwTSValues_all.csv")) %>%
   select(-"system:index", -".geo") %>%
   rename(blue = B2,
          green = B3,
@@ -242,13 +242,28 @@ tpw_ts_all <- read_csv("processed_data/csv/tpw/tpwTSValues_all.csv") %>%
          lc = Map) %>%
   filter(lc != 80)
 
-tpw_ts_all %>%
+# Merge double readings (more than one value in a day) by taking higher ndvi
+# value or lower raw band value
+
+# Import function s() from hablar package - manages NA values intuitively
+
+s <- hablar::s
+
+tpw_ts_unique <- tpw_ts_all %>%
+  group_by(plot_id, imgDate) %>%
+  summarise(blue = min(s(blue)), green = min(s(green)),
+            red = min(s(red)), ir = min(s(ir)),
+            ndvi = max(s(ndvi)), msavi = max(s(msavi)),
+            lc = first(lc), precipitation = first(precipitation)) %>%
+  ungroup()
+
+tpw_ts_unique %>%
   group_by(plot_id) %>%
   summarise(frac_na = sum(is.na(ndvi) / n())) %>%
   ggplot(aes(x = frac_na)) +
   geom_histogram(bins = 20, fill = "green", colour = "dark green", alpha = 0.5)
 
-tpw_ts_all %>%
+tpw_ts_unique %>%
   filter(plot_id %in% sample_plots) %>%
   ggplot(aes(x = imgDate, y = ndvi, colour = plot_id)) +
   geom_line() +
@@ -268,7 +283,7 @@ Simple linear interpolation:
 
 # First remove points with subsequent increase of > 0.1 in 5 days (assume cloud)
 # Then linear interpolation for all gaps
-tpw_all_int <- tpw_ts_all %>%
+tpw_all_int <- tpw_ts_unique %>%
   group_by(plot_id) %>%
   arrange(imgDate) %>%
   mutate(ndvi_spike = (lead(ndvi) - ndvi > 0.1),
@@ -415,7 +430,7 @@ these indices to real field measurements of percentage ground cover.
 To extract decay rates, I need to first define the end points of the season. I
 can use the season code I already created, or I can use NDVI decline
 
-```{r plots}
+```{r plots, eval = FALSE}
 
 plot_name <- "Alasukutan"
 
@@ -480,6 +495,337 @@ p5 <- ggplot(tpw_plot, aes(x = imgDate)) +
 
 ggsave(here("results", "figures", "ndvi_p5.jpg"), p5,
        width = 24, height = 16, units = "cm")
+
+```
+Now to divide the time series into annual/seasonal cycles and fit an exponential
+decay curve to each of them. Anticipated steps:
+1. Filter to divide each time series into their hydrological year (Oct-Sep)
+2. Remove or give NA values to seasons without a clearly defined NDVI curve
+   (max - min < 0.2?)
+2. Identify max and min NDVI values of the smoothed curve
+3. Filter out data before or after those values
+4. Transform NDVI by removing the min value, adding 1 and taking the log
+5. Fitting a linear model to each one (if it seems appropriate!)
+
+```{r exp_decay}
+
+tpw_hyear <- tpw_final %>%
+  mutate(hyear = year(imgDate + dmonths(4)))
+
+head(tpw_hyear)
+
+fit_decay <- function(df, col, log_mod = TRUE) {
+  
+  df <- df %>%
+    select(all_of(col)) %>%
+    rename(ndvi = 1)
+  
+  ndvi_ts = df$ndvi
+  
+  # Find max NDVI value
+  max <- max(ndvi_ts, na.rm = T)
+  max_index <- which.max(ndvi_ts)
+  
+  # Find min value subsequent to max value
+  ndvi_after <- ndvi_ts[max_index:length(ndvi_ts)]
+  min <- min(ndvi_after, na.rm = T)
+  min_index <- which.min(ndvi_after) + max_index - 1
+  
+  # Test if max-min is sufficient to define meaningful decay curve
+  if ((max - min) < 0.2) {
+    NA
+  } else {
+    # Isolate max-min curve for fitting and scale to zero
+    ndvi_curve <- ndvi_ts[max_index:min_index - 1] - min
+    
+    # Prepare and fit model
+    log_ndvi <- log(ndvi_curve)
+    day_curve <- seq_len(length(ndvi_curve))
+    
+    if (log_mod == TRUE) {
+      mod <- lm(log_ndvi ~ day_curve)
+    } else {
+      mod <- lm(ndvi_curve ~ day_curve)
+    }
+
+    mod
+  }
+}
+
+tpw_mod <- tpw_hyear %>%
+  group_by(plot_id, hyear) %>%
+  filter(hyear != 2023) %>%
+  nest() %>%
+  mutate(log_fit_new = map(data, fit_decay, col = "ndvi_new", log_mod = T),
+         log_fit_old = map(data, fit_decay, col = "ndvi", log_mod = T),
+         lin_fit_new = map(data, fit_decay, col = "ndvi_new", log_mod = F),
+         lin_fit_old = map(data, fit_decay, col = "ndvi", log_mod = F))
+
+# Pull out model performance metrics
+# Define an augmented "glance()" function that can handle NAs
+
+glance2 <- function(mod) {
+  if(all(is.na(mod))) {
+    NA
+  } else {
+    broom::glance(mod)
+  }
+}
+
+tpw_performance <- tpw_mod %>%
+  mutate(glance_log_n = map(log_fit_new, glance2),
+         glance_log_o = map(log_fit_old, glance2),
+         glance_lin_n = map(lin_fit_new, glance2),
+         glance_lin_o = map(lin_fit_old, glance2)) %>%
+  unnest(starts_with("glance"), names_sep = "_")
+
+# r-squared comparison
+tpw_performance %>%
+  select(plot_id, hyear, ends_with("adj.r.squared")) %>%
+  pivot_longer(cols = starts_with("glance"),
+               names_to = "model", values_to = "r_squared") %>%
+  ggplot(aes(x = r_squared, fill = model)) +
+  geom_histogram(position = "identity", alpha = 0.4, bins = 60) +
+  theme_bw()
+
+mean(tpw_performance$glance_log_n_r.squared, na.rm = T)
+mean(tpw_performance$glance_log_o_r.squared, na.rm = T)
+mean(tpw_performance$glance_lin_n_r.squared, na.rm = T)
+mean(tpw_performance$glance_lin_o_r.squared, na.rm = T)
+  
+```
+
+Damn! The highest r-squared is for the linear fit with the smoothed data.
+I think this might be because I'm not picking up the decay leg of the curve
+very effectively. I will try a new algorithm for doing this:
+1. Take the first and second derivatives of the smoothed NDVI curve
+2. Group by plot_id and year, and identify all maxima and minima in a list for
+each.
+3. Identify the period with the greatest increase (min to max) and
+greatest decrease (max to min) in the time series
+4. Calculate the rate of increase (linear?) and decay (exponential) for each one.
+Maybe I can write a function that chooses the linear or exponential fit for each
+case study based on r-squared.
+
+```{r max_min}
+
+tpw_derivatives <- tpw_hyear %>%
+  select(plot_id, hyear, imgDate, ndvi, ndvi_new) %>%
+  group_by(plot_id) %>%
+  arrange(imgDate) %>%
+  mutate(ndvi_smooth = smooth.spline(imgDate, ndvi_new)$y) %>%
+  mutate(ndvi_1d = (lag(ndvi_new) - lead(ndvi_new)) / as.numeric(lag(imgDate) - lead(imgDate)),
+         ndvi_1ds = (lag(ndvi_smooth) - lead(ndvi_smooth)) / as.numeric(lag(imgDate) - lead(imgDate)),
+         ndvi_2d = (lag(ndvi_1d) - lead(ndvi_1d)) / as.numeric(lag(imgDate) - lead(imgDate)),
+         ndvi_2ds = (lag(ndvi_1ds) - lead(ndvi_1ds)) / as.numeric(lag(imgDate) - lead(imgDate)))
+
+tpw_derivatives %>%
+  filter(plot_id == "Alasukutan") %>%
+  pivot_longer(starts_with("ndvi"), names_to = "var") %>%
+  ggplot(aes(x = imgDate, y = value)) +
+  geom_line() +
+  facet_wrap(~var, scales = "free") +
+  theme_bw()
+
+# Using the data smoothed with cubic splines seems to significantly reduce
+# noise in the first and second derivatives.
+
+# Identify points where 1st derivative == 0
+
+tpw_max_min <- tpw_derivatives %>%
+  mutate(is_max = (ndvi_1ds * lag(ndvi_1ds) < 0) & (ndvi_2ds < 0),
+         is_min = (ndvi_1ds * lag(ndvi_1ds) < 0) & (ndvi_2ds > 0))
+
+tpw_max_min %>%
+  filter(plot_id == "ALamunyani") %>%
+  ggplot(aes(x = imgDate)) +
+  geom_line(aes(y = ndvi_smooth), colour = "blue", alpha = 0.5) +
+  geom_line(aes(y = (ndvi_new - min(ndvi_new)))) +
+  # geom_point(aes(y = as.numeric(is_max)), colour = "blue", size = 1.5) +
+  # geom_point(aes(y = as.numeric(is_min)), colour = "red", size = 1.5) +
+  theme_bw() +
+  ylim(0, 1)
+
+# Successfully identifying maxima and minima; saddle points shouldn't occur
+
+# For each hydrological year, identify the greatest increase and decrease
+# between subsequent maxima/minima
+
+# 1. Create data frame of only max and min rows (including NDVI, imgDate and
+#    plot_id) arranged by imgDate
+# 2. Calculate NDVI differences between rows
+# 3. Extract imgDate for min value (largest drop =, i.e., decay) and max value
+#    (largest increase, i.e., recovery)
+
+tpw_events <- tpw_max_min %>%
+  filter(is_max | is_min) %>%
+  select(plot_id, imgDate, hyear, ndvi_new, ndvi_smooth, is_max, is_min) %>%
+  mutate(ndvi_diff = lead(ndvi_new) - ndvi_new,
+         ndvi_smooth_diff = lead(ndvi_smooth) - ndvi_smooth,
+         next_imgDate = lead(imgDate)) %>%
+  group_by(plot_id, hyear) %>%
+  summarise(growth_start = imgDate[which.max(ndvi_diff)],
+            growth_end = next_imgDate[which.max(ndvi_diff)],
+            decay_start = imgDate[which.min(ndvi_diff)],
+            decay_end = next_imgDate[which.min(ndvi_diff)])
+
+head(tpw_events)
+
+# Join with original time series for fitting
+tpw_fitting <- tpw_hyear %>%
+  left_join(tpw_events) %>%
+  group_by(plot_id) %>%
+  mutate(ndvi_scaled = ndvi_new - min(ndvi_new)) %>%
+  group_by(plot_id, hyear) %>%
+  mutate(growth_leg = (imgDate >= growth_start & imgDate <= growth_end),
+         decay_leg = (imgDate >= decay_start & imgDate <= decay_end))
+
+growth_fit <- function(ts, date) {
+  df <- tibble(date, ts) %>%
+    mutate(date = as.numeric(date),
+           date_scaled = (date - min(date)) / (max(date) - min(date)))
+  
+  logisticModel <- tryCatch(
+    nls(ts~K/(1+exp(-r*(date_scaled - x0))), data=df, 
+        start=list(K=max(df$ts), r=5, x0 = 0.5), 
+        control=list(maxiter=2000, minFactor=.00000000001)),
+    error=function(err) NA
+  )
+  
+  logisticModel
+}
+
+decay_fit <- function(ts, date) {
+  df <- tibble(date, ts) %>%
+    mutate(date = as.numeric(date),
+           date_scaled = (date - min(date)) / (max(date) - min(date)))
+  
+  logisticModel <- tryCatch(
+    nls(ts~K/(1+exp(-r*(date_scaled - x0))), data=df, 
+        start=list(K=max(df$ts), r=-5, x0 = 0.5), 
+        control=list(maxiter=2000, minFactor=.00000000001)),
+    error=function(err) NA
+  )
+  
+  logisticModel
+}
+
+tpw_growth_model <- tpw_fitting %>%
+  filter(!(hyear %in% c(2019,2023))) %>%
+  filter(growth_leg) %>%
+  summarise(mod = list(growth_fit(ndvi_scaled, imgDate)))
+
+tpw_decay_model <- tpw_fitting %>%
+  filter(!(hyear %in% c(2019,2023))) %>%
+  filter(decay_leg) %>%
+  summarise(mod = list(decay_fit(ndvi_scaled, imgDate)))
+
+# Test overall fit
+tidy <- function(mod) {
+  if (is.logical(mod)) {
+    NA
+  } else {
+    broom::tidy(mod)
+  }
+}
+growth_params <- tpw_growth_model %>%
+  mutate(params = map(mod, tidy)) %>%
+  unnest(params) %>%
+  mutate(pc_error = std.error / estimate * 100)
+
+growth_performance <- tpw_growth_model %>%
+  mutate(glance = tryCatch(map(mod, broom::glance), error = function(err) NA)) %>%
+  unnest(glance)
+
+summary(growth_fitted$mod[[1]])
+
+```
+
+We're almost there. The main problems are:
+a) At the start and end of the plot (where we have incomplete years), it ignores
+the true upward or downward legs and picks up intermediate wiggles. This loses
+data and gives false results (e.g., in 2019 for Alasukutan). For now, I'm
+excluding incomplete years (2019 and 2023), but that's a lot of data to throw
+away. Maybe if I use the Sentinel-2 L1C data...
+b) It still treats as a single decay curve any stretch with inflection points that
+don't reach local maxima/minima, but still throw off the shape. Ideally, I
+would identify changes in curvature from convex-up to concave-up, or the stretch
+with greatest local slope... But that may be too awkward and fudgy. For now,
+I've just gone ahead with model fitting and then generated an NA value if the
+model does not converge. I should also convert models with very poor fit or
+poorly constrained parameters to NA.
+
+The decay curves seem less well fitted than the growth curves, interestingly.
+Perhaps they are less of a good fit to the logistic curve as they tend to 
+decline steeply and then slow down rather than having a symmetrical shape, and
+also may have additional humps or slower decay rates in.
+
+Next steps:
+- Plot a few fitted models of both types to see how they're doing
+- Extract key parameters from models (height of curve, r etc.)
+- Check average error for a few different approaches (using global vs. local
+  min NDVI to scale, filtering out curves with very small increases/decreases,
+  logistic vs. exponential)
+
+```{r mod_vis}
+
+augment <- function(mod) {
+  if (is.logical(mod)) {
+    NA
+  } else {
+    broom::augment(mod)
+  }
+}
+
+growth_fitted <- tpw_growth_model %>%
+  mutate(values = map(mod, augment)) %>%
+  unnest(values) %>%
+  arrange(plot_id, hyear)
+
+tpw_growth_fitted <- tpw_fitting %>%
+  ungroup() %>%
+  arrange(plot_id, hyear) %>%
+  left_join(growth_fitted, by = c("plot_id", "hyear", "ndvi_scaled" = "ts"))
+
+head(tpw_growth_fitted)
+
+tpw_growth_fitted %>%
+  filter(plot_id == "ALamunyani") %>%
+  ggplot(aes(x = imgDate)) +
+  geom_line(aes(y = ndvi_scaled)) +
+  geom_line(aes(y = .fitted), colour = "orange", size = 1.5) +
+  # facet_wrap(~plot_id) +
+  theme_bw() +
+  ylim(0, 1)
+
+# Decay
+decay_fitted <- tpw_decay_model %>%
+  mutate(values = map(mod, augment)) %>%
+  unnest(values) %>%
+  arrange(plot_id, hyear)
+
+tpw_decay_fitted <- tpw_fitting %>%
+  ungroup() %>%
+  arrange(plot_id, hyear) %>%
+  left_join(decay_fitted, by = c("plot_id", "hyear", "ndvi_scaled" = "ts"))
+
+head(tpw_decay_fitted)
+
+tpw_decay_fitted %>%
+  filter(plot_id == "ALamunyani") %>%
+  ggplot(aes(x = imgDate)) +
+  geom_line(aes(y = ndvi_scaled)) +
+  geom_line(aes(y = .fitted), colour = "orange", size = 1.5) +
+  # facet_wrap(~plot_id) +
+  theme_bw() +
+  ylim(0, 1)
+                                                   
+growth_params %>%
+  filter(term == "K") %>%
+  ggplot(aes(x = estimate)) +
+  geom_histogram(fill = "light green", colour = "green", alpha = 0.6,
+                 binwidth = 0.05)
+
 
 ```
 
