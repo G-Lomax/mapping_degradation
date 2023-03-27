@@ -102,6 +102,11 @@ wbt_slope(
               "srtm_slope.tif")
 )
 
+slope <- raster(here("data", "processed", "raster", "srtm",
+                     "srtm_slope.tif"))
+
+slope_zoom <- crop(slope, bbox)
+
 # TWI with Freeman D8 flow accumulation algorithm
 wbt_fd8_flow_accumulation(
   dem = here("data", "processed", "raster", "srtm",
@@ -127,13 +132,23 @@ wbt_wetness_index(
                 "twi_fd8.tif")
 )
 
-twi_df8 <- raster(here("data", "processed", "raster", "srtm",
+twi_fd8 <- raster(here("data", "processed", "raster", "srtm",
                        "twi_fd8.tif"))
 
-twi_df8_zoom <- crop(twi_df8, bbox)
+twi_fd8_zoom <- crop(twi_df8, bbox)
 
 tm_shape(hillshade_zoom)+
   tm_raster(style = "cont",palette = "-Greys", legend.show = FALSE)+
-  tm_shape(twi_df8_zoom)+
+  tm_shape(twi_fd8_zoom)+
   tm_raster(style = "cont", palette = "PuOr", legend.show = TRUE, alpha = 0.5)+
   tm_scale_bar()
+
+# Clean and plot TWI
+twi_fd8[twi_fd8 > 10] <- NA
+
+twi_fd8_zoom <- crop(twi_fd8, bbox)
+
+tm_shape(hillshade_zoom) + tm_raster(style = "cont", palette = "-Greys", legend.show = F) +
+  tm_shape(log(fd8fa_zoom)) + tm_raster(style = "cont", palette = "RdBu", alpha= 0.6) +
+  tm_shape(twi_fd8_zoom) + tm_raster(style = "cont", palette = "PuOr", alpha = 0.6,
+                                     breaks = seq(-6, 0, 1))
