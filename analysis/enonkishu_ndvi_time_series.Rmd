@@ -9,27 +9,26 @@ output:
 
 ## Introduction
 
-In this document, I extract some key metrics from Tanzania People and Wildlife
-rangeland monitoring data and show how they can be linked  with high-resolution
-vegetation index data from the Sentinel-2 satellites.
+In this document, I generate smooth, high-resolution NDVI time series for
+Tanzania People and Wildlife rangeland monitoring plots from 2017-2022. 
 
-Sentinel-2 provides global satellite imagery at 5-day intervals and at 10-meter
-resolution, making it one of the most precise freely available satellite
-datasets currently available. Sentinel-2 imagery at 5-day intervals is available
-for East Africa from early 2017, providing about six years of continuous data.
+Sentinel-2 provides global satellite imagery at 5-day intervals and at
+10-meter resolution, making it one of the most precise freely available
+satellite datasets currently available. Sentinel-2 imagery at 5-day
+intervals is available for East Africa from early 2017, providing about
+six years of continuous data.
 
-The fine resolution of Sentinel-2 allows us to understand vegetation patterns
-and change on smaller scales than previously possible, to more easily distinguish
-between open areas and tree- or shrub-covered areas, and to connect remote sensing
-data to field data collected at the level of individual sample plots or
-transects.
+The fine resolution of Sentinel-2 allows us to understand vegetation
+patterns and change on smaller scales than previously possible, to more
+easily distinguish between open areas and tree- or shrub-covered areas,
+and to connect remote sensing data to field data collected at the level
+of individual sample plots or transects.
 
-Here, I have used the cloud-based platform Google Earth Engine to extract raw
-Sentinel-2 data from September 2017 to September 2022 for each of the TPW
-monitoring plots, and convert the raw data into a continuous NDVI time series
-that provide detailed insight into the patterns of vegetation productivity and
-change at TPW monitoring plots.
-
+Here, I have used the cloud-based platform Google Earth Engine to
+extract raw Sentinel-2 data from September 2017 to September 2022 for
+each of the TPW monitoring plots, and convert the raw data into a
+continuous NDVI time series that provide detailed insight into the
+patterns of vegetation productivity and change at TPW monitoring plots.
 
 ```{r setup, include = F}
 
@@ -57,135 +56,29 @@ knitr::opts_chunk$set(
 
 ```
 
-## Load and pre-process data
 
-TPW's original data were in the form of a nested layer in ArcPro, with each point
-(sampling event) associated with a table of 20 rows, one for every 5 meters
-along the 100-meter transect. Data were thus extracted as two separate files: a
-shapefile containing 7,273 rows (one per sampling event) and a CSV file containing
-130,102 rows (20 per sampling event, with some records having more or fewer).
+## Extract Sentinel-2 NDVI time series data from Google Earth Engine
 
-```{r load}
+I have selected six sample points in and around Enonkishu Conservancy to
+demonstrate the time series analysis. For each point, I have extracted the
+NDVI (Normalised Difference Vegetation Index) and MSAVI2 (Modified
+Soil-Adjusted Vegetation Index) values for all Sentinel-2 images
+intersecting the location from 2017-2022 at 10m resolution. I extracted the mean
+values across a circle of 50m radius centred on the plot location, including
+only pixels identified as grass/open ground rather than trees or shrubs.
 
-# TPW data
-tpw_points <- st_read(here("data", "raw", "vector", "tpw",
-                           "Rangeland_Ufuatiliaji_wa_Nyanda_za_Malisho.shp"))
-tpw_table <- read_csv(here("data", "raw", "csv", "tpw", "samplemetrics.csv"))
-
-# Tanzania country boundary
-tz <- st_read(here("data", "raw", "vector", "natural_earth",
-                   "ne_110m_admin_0_countries_fixed.shp")) %>%
-  filter(NAME == "Tanzania") %>%
-  select(NAME)
-
-```
-
-I haFor now, I am removing sampling events that have fewer or more than 20
-associated rows along the transect, as well as those with greater than 100 total
-strikes reported for bare + basal plant cover.
-
-```{r join_clean}
-
-tpw_joined <- tpw_points %>%
-  mutate(globalid = toupper(globalid)) %>%
-  left_join(tpw_table, by = c("globalid" = "parentglobalid"))
-
-# n_distinct(tpw_points$globalid)
-# n_distinct(tpw_table$parentglobalid)
-
-# n_measurements <- tpw_joined %>% group_by(globalid) %>% summarise(n = n())
-
-# 1,255 out of 7,273 sampling events in tpw_points have zero rows from tpw_table
-# associated with them. A further 53 rows have incorrect (not 20) images and
-# may need cleaning.
-
-# Columns to keep
-vars <- c("globalid", "plot_id", "village", "village_pl", "dateTime",
-          "plotburned", "plotgrazed", "plotcolor", "invasives_", "plotqualit",
-          "sampleID", "markbare", "markbasal", "grassheight")
-
-tpw_condensed <- tpw_joined %>%
-  unite("plot_id", starts_with("plotID"),
-        sep = "", na.rm = TRUE) %>%
-  select(all_of(vars)) %>%
-  group_by(globalid, plot_id, village, village_pl, dateTime) %>%
-  summarise(n = n(),
-            plotburned = first(plotburned),
-            plotgrazed = first(plotgrazed),
-            plotcolor = first(plotcolor),
-            invasives = first(invasives_),
-            plotquality = first(plotqualit),
-            bare = sum(markbare),
-            basal = sum(markbasal),
-            grassheight = mean(grassheight)) %>%
-  ungroup() %>%
-  select(-globalid)
-
-# Remove rows with no data or incorrect numbers of samples
-# I could include the 8 rows with 21/22 samples by manually removing duplicates
-# Also remove locations outside Tanzania
-
-tpw_clean <- tpw_condensed %>%
-  filter(n == 20) %>%
-  filter(!is.na(plotburned) & !is.na(plotgrazed)) %>%
-  filter(bare + basal == 100) %>%
-  st_filter(tz)
-
-tpw_locations <- tpw_clean %>%
-  mutate(x = st_coordinates(geometry)[,1],
-         y = st_coordinates(geometry)[,2]) %>%
-  st_drop_geometry() %>%
-  group_by(plot_id) %>%
-  summarise(x = median(x),
-            y = median(y)) %>%
-  st_as_sf(crs = 4326, coords = c("x", "y"))
-
-# How many are within Tanzania?
-# st_filter(tpw_locations, tz) %>% nrow()
-# All are within Tanzania - let's assume they're correct for now
-
-tpw_locations_fixed <- tpw_clean %>%
-  st_drop_geometry %>%
-  left_join(tpw_locations)
-
-# Visualise tpw_locations on map of Tanzania
-
-tm_shape(tpw_locations) + tm_dots(size = 0.02, col = "brown") +
-  tm_view(set.view = 7) + tm_basemap(leaflet::providers$Stamen.Terrain)
-
-# Write locations to shapefile for extraction
-
-# st_write(tpw_locations,
-#          here("data", "processed", "vector", "tpw", "tpw_locations.shp"),
-#          delete_dsn = T)
-
-```
-
-# Combine with Sentinel-2 NDVI time series data from Google Earth Engine
-
-The GPS coordinates of the transect locations were used to extract local NDVI
-(Normalised Difference Vegetation Index) and MSAVI2 (Modified Soil-Adjusted
-Vegetation Index) values for all Sentinel-2 images intersecting the location
-from 2019-2023, at 10m resolution.
-
-Sampling locations that were partially covered by lakes (e.g., Lake Manyara)
-within the period have been discarded.
-
-I have randomly sampled six of the monitoring transect locations to visualise
-the NDVI time series.
 
 ```{r full_ts, cache = T}
 
-tpw_ts_all <- read_csv(here("data", "processed", "csv", "tpw",
-                            "tpwTSValues_all_l1c.csv")) %>%
+ts_all <- read_csv(here("data", "processed", "csv", "tpw",
+                        "enonkishuTSValues_all_l1c.csv")) %>%
   select(-"system:index", -".geo") %>%
   na_if(-99) %>%
   rename(blue = B2,
          green = B3,
          red = B4,
          ir = B8,
-         lc = Map) %>%
-  filter(lc != 80)
+         lc = Map)
 
 # Merge double readings (more than one value in a day) by taking higher ndvi
 # value or lower raw band value
@@ -219,18 +112,20 @@ tpw_ts_unique %>%
 
 ```
 
-The raw time series contain noise and many missing values due to cloud cover and
-variable atmospheric conditions. We can fill these gaps using an intelligent
-smoothing approach to create a smooth time series that approximates the true
-time series values (based on Chen et al. 2004). The method relies on two facts:
-(a) Real NDVI tends to change smoothly, without abrupt spikes or drops.
-(b) Cloud cover and other disturbances tend to reduce NDVI values.
+As can be seen, the raw time series contains noise and many missing
+values due to cloud cover and variable atmospheric conditions. We can
+fill these gaps using an intelligent smoothing approach to create a
+continuous time series that approximates the true time series values
+(based on Chen et al. 2004). The method relies on two facts: (a) Real
+NDVI tends to change smoothly, without abrupt spikes or drops. (b) Cloud
+cover and other disturbances tend to reduce NDVI values compared to
+their true values.
 
-This means that we can make a best guess of the "true" value by fitting a curve
-to the upper envelope of the time series. To do this we use a Savitzky-Golay
-filter, which smooths out the jagged noise in the time series, and use it to
-boost unusually low values in the time series towards the upper envelope.
-
+This means that we can make a best guess of the "true" value by fitting
+a curve to the upper envelope of the time series. To do this we use a
+Savitzky-Golay filter, which smooths out the jagged noise in the time
+series, and use it to boost unusually low values in the time series
+towards the upper envelope.
 
 ```{r gapfilling, cache = T, dependson= "full_ts"}
 
@@ -352,24 +247,25 @@ tpw_final %>%
 ```
 
 The grey shows the original data, while the green shows the smoothed
-version. It isn't perfect - it still tends to give a spiky pattern when there is
-a lot of noise or not much data (e.g., in Orkoliliy) - but it is a big improvement
-on the original data. I am continuing to refine this.
+version. It isn't perfect - it still tends to give a spiky pattern when
+there is a lot of noise or not much data (e.g., in Orkoliliy) - but it
+is a big improvement on the original data. I am continuing to refine
+this.
 
-The annual seasonal cycle is very clearly visible, and you can clearly see the
-differences between sites like Enguko and those like Orkoliliy. The
-smoother also preserves the overall shape of the increase at the start of each
-wet season and the subsequent decrease.
+The annual seasonal cycle is very clearly visible, and you can clearly
+see the differences between sites like Enguko and those like Orkoliliy.
+The smoother also preserves the overall shape of the increase at the
+start of each wet season and the subsequent decrease.
 
-# Extracting vegetation metrics from satellite data
+## Extracting vegetation metrics from satellite data
 
-From these curves, we can start to extract some potentially useful metrics
-to track land health, degradation and resilience. A few we might be interested
-in are:
+From these curves, we can start to extract some potentially useful
+metrics to track land health, degradation and resilience. A few we might
+be interested in are:
 
-1. The peak greenness each year compared to baseline.
-2. The overall area below the curve, a proxy for productivity.
-3. The relationship between these values and rainfall.
+1.  The peak greenness each year compared to baseline.
+2.  The overall area below the curve, a proxy for productivity.
+3.  The relationship between these values and rainfall.
 
 ```{r metrics, cache = T, dependson = c("full_ts", "gapfilling")}
 
@@ -421,26 +317,27 @@ tpw_hyear %>%
 
 ```
 
-Another indicator of interest may be the recovery rate and decay rate of NDVI
-at the start or end of the season. More rapid recovery and greater persistence
-of green vegetation in the dry season may be associated with greater vegetation
-resilience and the presence of perennial grasses and herbs in addition to
-annual species.
+Another indicator of interest may be the recovery rate and decay rate of
+NDVI at the start or end of the season. More rapid recovery and greater
+persistence of green vegetation in the dry season may be associated with
+greater vegetation resilience and the presence of perennial grasses and
+herbs in addition to annual species.
 
-We can quantify this for each site by fitting growth and decay curves to the
-NDVI profile for each year.
+We can quantify this for each site by fitting growth and decay curves to
+the NDVI profile for each year.
 
-In the section below, the first figure shows an example of models fitted to the
-growth phase (start of the growing season) and the decay phase (end of the
-growing season). In some cases, the model hasn't been able to fit the shape of
-the curve, because the shape is irregular.
+In the section below, the first figure shows an example of models fitted
+to the growth phase (start of the growing season) and the decay phase
+(end of the growing season). In some cases, the model hasn't been able
+to fit the shape of the curve, because the shape is irregular.
 
-Fitting these statistical models to the data allows us to extract the growth
-rate and decay rate of each season as a single number. We can then use these
-growth rates to explore how plots are changing over time, and examine whether
-this is driven by rainfall or other factors (like change in vegetation).
-The second figure shows the distribution of growth rates and decay rates for
-all the plots over the period 2017-2022.
+Fitting these statistical models to the data allows us to extract the
+growth rate and decay rate of each season as a single number. We can
+then use these growth rates to explore how plots are changing over time,
+and examine whether this is driven by rainfall or other factors (like
+change in vegetation). The second figure shows the distribution of
+growth rates and decay rates for all the plots over the period
+2017-2022.
 
 ```{r growth_decay_models, cache = T,dependson = c("full_ts", "gapfilling", "metrics")}
 
@@ -624,7 +521,6 @@ decay_performance <- tpw_decay_model %>%
 
 ```
 
-
 ```{r model_vis}
 
 # Extract model fitted values
@@ -693,13 +589,15 @@ all_params %>%
 
 From here, we could use these data in different ways:
 
-1. We could look at changes over time in greenness, in recovery/decay rates or
-in other metrics like rain use efficiency, to explore which plots or areas are
-improving or deteriorating over time. 
-2. We could examine the drivers behind the differences in growth or decay rates,
-for example distinguishing the effects of rainfall, soil type or management.
-3. We could compare these metrics between regions with similar areas outside the
-regions that TPW works in, for example to better understand impact.
-4. We could compare some of these metrics to the field data TPW has collected,
-for example in order to test whether they allow us to predict ground cover or
-the presence of particular species.
+1.  We could look at changes over time in greenness, in recovery/decay
+    rates or in other metrics like rain use efficiency, to explore which
+    plots or areas are improving or deteriorating over time.
+2.  We could examine the drivers behind the differences in growth or
+    decay rates, for example distinguishing the effects of rainfall,
+    soil type or management.
+3.  We could compare these metrics between regions with similar areas
+    outside the regions that TPW works in, for example to better
+    understand impact.
+4.  We could compare some of these metrics to the field data TPW has
+    collected, for example in order to test whether they allow us to
+    predict ground cover or the presence of particular species.
