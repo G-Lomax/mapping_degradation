@@ -1,5 +1,5 @@
 ---
-title: "Tanzania People and Wildlife: Data Exploration and NDVI Time Series"
+title: "Tanzania People and Wildlife: Data Exploration and MSAVI Time Series"
 author: "Guy Lomax"
 date: '2023-03-31'
 output:
@@ -9,7 +9,7 @@ output:
 
 ## Introduction
 
-In this notebook, I generate smooth, high-resolution NDVI time series for
+In this notebook, I generate smooth, high-resolution MSAVI time series for
 Tanzania People and Wildlife rangeland monitoring plots from 2017-2022. 
 
 Sentinel-2 provides global satellite imagery at 5-day intervals and at
@@ -27,7 +27,7 @@ of individual sample plots or transects.
 Here, I have used the cloud-based platform Google Earth Engine to
 extract raw Sentinel-2 data from September 2017 to September 2022 for
 each of the TPW monitoring plots, and convert the raw data into a
-continuous NDVI time series that provide detailed insight into the
+continuous MSAVI time series that provide detailed insight into the
 patterns of vegetation productivity and change at TPW monitoring plots.
 
 ```{r setup, include = F}
@@ -51,7 +51,7 @@ tmap_mode("view")
 knitr::opts_chunk$set(
   comment = "#>",
   echo = FALSE, warning = FALSE, message = FALSE,
-  fig.keep = "all"
+  fig.keep = "all"#, fig.width = 8
 )
 
 ```
@@ -170,21 +170,21 @@ tmap_leaflet(tm_shape(tpw_locations) + tm_dots(size = 0.02, col = "brown") +
 I then exported these locations to be used in Google Earth Engine to
 extract Sentinel-2 vegetation index values for the plots.
 
-## Combine with Sentinel-2 NDVI time series data from Google Earth Engine
+## Combine with Sentinel-2 MSAVI time series data from Google Earth Engine
 
 The GPS coordinates of the transect locations were used to extract local
-NDVI (Normalised Difference Vegetation Index) and MSAVI2 (Modified
+MSAVI (Normalised Difference Vegetation Index) and MSAVI2 (Modified
 Soil-Adjusted Vegetation Index) values for all Sentinel-2 images
 intersecting the location from 2017-2022 at 10m resolution. I extracted the mean
 values across a circle of 50m radius centred on the plot location, excluding
 pixels identified as tree, shrub or other non-grassy land cover.
 
 I have randomly selected six of the monitoring transect locations to
-visualise the NDVI time series.
+visualise the MSAVI time series.
 
 ```{r full_ts, cache = T}
 
-# Load and clean NDVI time series data from GEE
+# Load and clean MSAVI time series data from GEE
 # Replace nodata value (-100) with NA
 # Convert band values for partially masked plots to include unmasked values only
 # Rename
@@ -193,10 +193,7 @@ visualise the NDVI time series.
 tpw_ts_all <- read_csv(here("data", "processed", "csv", "tpw",
                             "tpwTSValues_all_l1c.csv")) %>%
   select(-"system:index", -".geo") %>%
-  mutate(across(.cols = c("B2", "B3", "B4", "B8", "ndvi", "msavi"),
-                .fns = ~na_if(.x, -100))) %>%
-  mutate(across(.cols = c("B2", "B3", "B4", "B8", "ndvi", "msavi"),
-                .fns = function(x) (ifelse(maskFrac > 0.8, NA, x)))) %>%
+  na_if(-100) %>%
   mutate(across(.cols = c("B2", "B3", "B4", "B8", "ndvi", "msavi"),
                 .fns = function(x) (x + 100 * maskFrac) / (1 - maskFrac))) %>%
   rename(blue = B2,
@@ -206,7 +203,7 @@ tpw_ts_all <- read_csv(here("data", "processed", "csv", "tpw",
          lc = Map) %>%
   filter(lc != 80)
 
-# Merge double readings (more than one value in a day) by taking higher ndvi
+# Merge double readings (more than one value in a day) by taking higher msavi
 # value or lower raw band value
 
 # Import function s() from hablar package - manages NA values intuitively
@@ -225,23 +222,21 @@ tpw_ts_unique <- tpw_ts_all %>%
 
 tpw_ts_unique <- tpw_ts_unique %>%
   group_by(plot_id) %>%
-  filter(sum(is.na(ndvi)) < 0.9 * n())
+  filter(sum(is.na(msavi)) < 0.9 * n())
 
 # Plot sample
-
-
 set.seed(14941)
 plot_names <- unique(tpw_ts_unique$plot_id)
 sample_plots <- sample(plot_names, 6)
 
 tpw_ts_unique %>%
   filter(plot_id %in% sample_plots) %>%
-  ggplot(aes(x = imgDate, y = ndvi)) +
+  ggplot(aes(x = imgDate, y = msavi)) +
   facet_wrap(~plot_id) +
   # geom_line() +
   geom_point(size = 0.5) +
   theme_clean() +
-  labs(x = "Date", y = "NDVI")
+  labs(x = "Date", y = "MSAVI")
 
 
 ```
@@ -251,8 +246,8 @@ values due to cloud cover and variable atmospheric conditions. We can
 fill these gaps using an intelligent smoothing approach to create a
 continuous time series that approximates the true time series values
 (based on Chen et al. 2004). The method relies on two facts: (a) Real
-NDVI tends to change smoothly, without abrupt spikes or drops. (b) Cloud
-cover and other disturbances tend to reduce NDVI values compared to
+MSAVI tends to change smoothly, without abrupt spikes or drops. (b) Cloud
+cover and other disturbances tend to reduce MSAVI values compared to
 their true values.
 
 This means that we can make a best guess of the "true" value by fitting
@@ -274,18 +269,13 @@ towards the upper envelope.
 tpw_all_int <- tpw_ts_unique %>%
   group_by(plot_id) %>%
   arrange(imgDate) %>%
-  mutate(ndvi_int = na_interpolation(ndvi),
-         ndvi_spike = ((lead(ndvi_int) - ndvi_int) > 0.05),
-         ndvi_drop = ((lag(ndvi_int) - ndvi_int) > 0.05),
-         ndvi_mod = na_if(ndvi, ((ndvi_spike | ndvi_drop) * ndvi)),
-         ndvi_int = na_interpolation(ndvi_mod)) %>%
-  select(-ndvi_spike, -ndvi_drop)
-
-tpw_all_int %>%
-  filter(plot_id %in% sample_plots) %>%
-  ggplot(aes(x = imgDate, y = ndvi_int)) +
-  geom_line() +
-  geom_point(aes(y = ndvi), colour = "blue")
+  mutate(msavi_int = na_interpolation(msavi),
+         msavi_spike = (lead(msavi_int) - msavi_int > 0.1),
+         msavi_drop = (lag(msavi_int) - msavi_int > 0.1),
+         msavi_int = na_if(msavi_int, ((msavi_spike | msavi_drop) * msavi)),
+         msavi_int = na_interpolation(msavi_int)) %>%
+  select(-msavi_spike, -msavi_drop)
+         
 
 # Apply Savitzky-Golay filter to smooth signal
 # For now, use m = 40-60 days (i.e., 8-12 images) and d = 3
@@ -315,50 +305,50 @@ tpw_all_int %>%
 
 # tpw_sg1_opt <- tpw_all_int %>%
 #   group_by(plot_id) %>%
-#   mutate(opt = find_least_error(ndvi_int))
+#   mutate(opt = find_least_error(msavi_int))
 
 tpw_sg1 <- tpw_all_int %>%
   group_by(plot_id) %>%
-  mutate(ndvi_filtered = sgolayfilt(ndvi_int, p = 2, n = 25))
+  mutate(msavi_filtered = sgolayfilt(msavi_int, p = 3, n = 25))
 
-# Assign weights to NDVI values in original (interpolated) series based on
+# Assign weights to MSAVI values in original (interpolated) series based on
 # whether they fall above or below the trend curve for that TS.
 
 tpw_weights <- tpw_sg1 %>%
-  mutate(dist = ndvi_filtered - ndvi_int,
+  mutate(dist = msavi_filtered - msavi_int,
          max_dist = max(dist),
          weight = ifelse(dist > 0, 1 - (dist / max_dist), 1))
 
-# Iterative approach to upper ndvi envelope
-# Generate new time series by replacing "noisy" NDVI values with filtered ones
+# Iterative approach to upper msavi envelope
+# Generate new time series by replacing "noisy" MSAVI values with filtered ones
 # Second, shorter-period SG filter
 
-iterative_fit <- function(ndvi_1, ndvi_0, weight) {
+iterative_fit <- function(msavi_1, msavi_0, weight) {
   
   initial_fit <- 100
-  new_fit <- sum(abs(ndvi_1 - ndvi_0) * weight)
-  ndvi_new <- ndvi_1
+  new_fit <- sum(abs(msavi_1 - msavi_0) * weight)
+  msavi_new <- msavi_1
 
   while(initial_fit > new_fit) {
     initial_fit <- new_fit
     
-    ndvi_new <- ifelse(ndvi_new >= ndvi_0, ndvi_new, ndvi_0) %>%
+    msavi_new <- ifelse(msavi_new >= msavi_0, msavi_new, msavi_0) %>%
     sgolayfilt(p = 4, n = 15)
   
-  new_fit <- sum(abs(ndvi_new - ndvi_0) * weight)
+  new_fit <- sum(abs(msavi_new - msavi_0) * weight)
   }
-  ndvi_new
+  msavi_new
 }
 
 # Iterate to get final time series
 
 tpw_final <- tpw_weights %>%
-  mutate(ndvi_new = iterative_fit(ndvi_filtered, ndvi_int, weight)) %>%
-  select(-dist, -max_dist, -weight, -ndvi_int, -ndvi_filtered)
+  mutate(msavi_new = iterative_fit(msavi_filtered, msavi_int, weight)) %>%
+  select(-dist, -max_dist, -weight, -msavi_int, -msavi_filtered)
 
 # tpw_final %>%
 #   filter(plot_id %in% sample_plots) %>%
-#   pivot_longer(cols = c("ndvi_int", "ndvi_filtered", "ndvi_new"),
+#   pivot_longer(cols = c("msavi_int", "msavi_filtered", "msavi_new"),
 #                names_to = "var", values_to = "value") %>%
 #   ggplot() +
 #   geom_line(aes(x = imgDate, y = value, colour = var)) +
@@ -373,16 +363,15 @@ tpw_final %>%
   filter(plot_id %in% sample_plots) %>%
   ggplot(aes(x = imgDate)) +
   # geom_col(aes(y = precipitation / max(precipitation)), fill = "blue") +
-  geom_point(aes(y = ndvi), colour = "brown", size = 0.2) +
-  geom_line(aes(y = ndvi_new), colour = "dark blue") +
-  # geom_line(aes(y = ndvi), colour = "grey40") +
+  geom_line(aes(y = msavi_new), colour = "green", size = 1) +
+  geom_point(aes(y = msavi), colour = "grey40", size = 0.5) +
+  # geom_line(aes(y = msavi), colour = "grey40") +
   facet_wrap(~plot_id) +
   theme_clean() +
-  scale_x_date(breaks = "1 year", date_labels = "%Y") +
+  # scale_x_date(breaks = "6 months", minor_breaks = "3 month") +
   ylim(0, 1) +
-  labs(x = "Date", y = "NDVI")
-
-
+  # theme(axis.text.x = element_text(angle = 60, vjust = 0.5, hjust=1)) +
+  labs(x = "Date", y = "MSAVI")
 
 ```
 
@@ -415,15 +404,15 @@ tpw_hyear <- tpw_final %>%
 
 tpw_metrics <- tpw_hyear %>%
   group_by(plot_id) %>%
-  mutate(min_ndvi = min(ndvi_new),
-         ndvi_pc10 = quantile(ndvi_new, 0.1),
-         growing_season = ndvi_new > ndvi_pc10) %>%
+  mutate(min_msavi = min(msavi_new),
+         msavi_pc10 = quantile(msavi_new, 0.1),
+         growing_season = msavi_new > msavi_pc10) %>%
   group_by(plot_id, hyear) %>%
-  summarise(min_ndvi = first(min_ndvi),
-            seasonal_min_ndvi = min(ndvi_new),
-            peak_ndvi = max(ndvi_new) - min_ndvi,
-            ndvi_auc = sum(ndvi_new * growing_season) - 
-              (sum(growing_season) * min_ndvi),
+  summarise(min_msavi = first(min_msavi),
+            seasonal_min_msavi = min(msavi_new),
+            peak_msavi = max(msavi_new) - min_msavi,
+            msavi_auc = sum(msavi_new * growing_season) - 
+              (sum(growing_season) * min_msavi),
             season_ppt = sum(precipitation * growing_season))
 
 tpw_hyear %>%
@@ -431,36 +420,36 @@ tpw_hyear %>%
   group_by(plot_id) %>%
   mutate(ppt_scaled = precipitation / max(precipitation, na.rm = T)) %>%
   ggplot(aes(x = imgDate)) +
-  geom_line(aes(y = ndvi_new), colour = "dark green") +
-  geom_point(aes(y = ndvi), colour = "grey", size = 0.2) +
+  geom_line(aes(y = msavi_new), colour = "green") +
+  geom_point(aes(y = msavi), colour = "grey", size = 0.2) +
   geom_col(aes(y = ppt_scaled), alpha = 0.5) +
   facet_wrap(~plot_id) +
   ylim(0, 1) +
   theme_clean() +
-  labs(x = "Date", y = "NDVI",
-       title = "NDVI relative to rainfall timing and amount",
+  labs(x = "Date", y = "MSAVI",
+       title = "MSAVI relative to rainfall timing and amount",
        subtitle = "Columns represent dates of rainfall")
 
 tpw_metrics %>%
   filter(plot_id %in% sample_plots) %>%
-  ggplot(aes(x = season_ppt, y = ndvi_auc, colour = plot_id, shape = plot_id)) +
+  ggplot(aes(x = season_ppt, y = msavi_auc, colour = plot_id, shape = plot_id)) +
   geom_point(size = 2) +
   theme_clean() +
   labs(x = "Seasonal rainfall (mm)",
-       y = "Integrated seasonal NDVI",
+       y = "Integrated seasonal MSAVI",
        colour = "Plot",
        shape = "Plot")
 
 ```
 
 Another indicator of interest may be the recovery rate and decay rate of
-NDVI at the start or end of the season. More rapid recovery and greater
+MSAVI at the start or end of the season. More rapid recovery and greater
 persistence of green vegetation in the dry season may be associated with
 greater vegetation resilience and the presence of perennial grasses and
 herbs in addition to annual species.
 
 We can quantify this for each site by fitting growth and decay curves to
-the NDVI profile for each year.
+the MSAVI profile for each year.
 
 In the section below, the first figure shows an example of models fitted
 to the growth phase (start of the growing season) and the decay phase
@@ -480,14 +469,14 @@ growth rates and decay rates for all the plots over the period
 # Take first and second derivatives to identify maxima and minima in time series
 # First smooth with cubic splines to reduce noise in derivatives
 tpw_derivatives <- tpw_hyear %>%
-  select(plot_id, hyear, imgDate, ndvi, ndvi_new) %>%
+  select(plot_id, hyear, imgDate, msavi, msavi_new) %>%
   group_by(plot_id) %>%
   arrange(imgDate) %>%
-  mutate(ndvi_smooth = smooth.spline(imgDate, ndvi_new)$y) %>%
-  mutate(ndvi_1d = (lag(ndvi_new) - lead(ndvi_new)) / as.numeric(lag(imgDate) - lead(imgDate)),
-         ndvi_1ds = (lag(ndvi_smooth) - lead(ndvi_smooth)) / as.numeric(lag(imgDate) - lead(imgDate)),
-         ndvi_2d = (lag(ndvi_1d) - lead(ndvi_1d)) / as.numeric(lag(imgDate) - lead(imgDate)),
-         ndvi_2ds = (lag(ndvi_1ds) - lead(ndvi_1ds)) / as.numeric(lag(imgDate) - lead(imgDate)))
+  mutate(msavi_smooth = smooth.spline(imgDate, msavi_new)$y) %>%
+  mutate(msavi_1d = (lag(msavi_new) - lead(msavi_new)) / as.numeric(lag(imgDate) - lead(imgDate)),
+         msavi_1ds = (lag(msavi_smooth) - lead(msavi_smooth)) / as.numeric(lag(imgDate) - lead(imgDate)),
+         msavi_2d = (lag(msavi_1d) - lead(msavi_1d)) / as.numeric(lag(imgDate) - lead(imgDate)),
+         msavi_2ds = (lag(msavi_1ds) - lead(msavi_1ds)) / as.numeric(lag(imgDate) - lead(imgDate)))
 
 # Identify points where 1st derivative == 0 as maxima (2nd derivative < 0) or
 # minima (2nd derivative > 0)
@@ -495,15 +484,15 @@ tpw_derivatives <- tpw_hyear %>%
 # where 1st derivative undergoes a change in sign
 
 tpw_max_min <- tpw_derivatives %>%
-  mutate(is_max = (ndvi_1ds * lag(ndvi_1ds) < 0) & (ndvi_2ds < 0),
-         is_min = (ndvi_1ds * lag(ndvi_1ds) < 0) & (ndvi_2ds > 0))
+  mutate(is_max = (msavi_1ds * lag(msavi_1ds) < 0) & (msavi_2ds < 0),
+         is_min = (msavi_1ds * lag(msavi_1ds) < 0) & (msavi_2ds > 0))
 
 # For each hydrological year, identify the greatest increase and decrease
 # between subsequent maxima/minima
 
-# 1. Create data frame of only max and min rows (including NDVI, imgDate and
+# 1. Create data frame of only max and min rows (including MSAVI, imgDate and
 #    plot_id) arranged by imgDate
-# 2. Calculate NDVI differences between rows
+# 2. Calculate MSAVI differences between rows
 # 3. Extract imgDate for min value (largest drop =, i.e., decay) and max value
 #    (largest increase, i.e., recovery)
 #
@@ -513,9 +502,9 @@ tpw_max_min <- tpw_derivatives %>%
 
 tpw_events <- tpw_max_min %>%
   filter(is_max | is_min) %>%
-  select(plot_id, imgDate, hyear, ndvi_new, ndvi_smooth, is_max, is_min) %>%
-  mutate(lead_diff = lead(ndvi_new) - ndvi_new,
-         lag_diff = lag(ndvi_new) - ndvi_new,
+  select(plot_id, imgDate, hyear, msavi_new, msavi_smooth, is_max, is_min) %>%
+  mutate(lead_diff = lead(msavi_new) - msavi_new,
+         lag_diff = lag(msavi_new) - msavi_new,
          next_imgDate = lead(imgDate),
          prev_imgDate = lag(imgDate)) %>%
   group_by(plot_id, hyear) %>%
@@ -528,7 +517,7 @@ tpw_events <- tpw_max_min %>%
 tpw_fitting <- tpw_hyear %>%
   left_join(tpw_events) %>%
   group_by(plot_id, hyear) %>%
-  mutate(ndvi_scaled = ndvi_new - min(ndvi_new)) %>%
+  mutate(msavi_scaled = msavi_new - min(msavi_new)) %>%
   mutate(growth_leg = (imgDate >= growth_start & imgDate <= growth_end),
          decay_leg = (imgDate >= decay_start & imgDate <= decay_end))
 
@@ -549,10 +538,10 @@ growth_fit <- function(ts, date, model = "linear") {
   } else if(model == "logistic") {
     
     mod <- tryCatch(
-      nls(ts ~ max(df$ts) / (1 + exp(-r * (date_scaled - x0))), data = df,
-          start = list(r = 5, x0 = 0.5),
-          control = list(maxiter = 2000, minFactor = .00000000001)),
-      error = function(err) NA
+      nls(ts ~ max(df$ts)/(1 + exp(-r * (date_scaled - x0))), data=df,
+          start=list(r=5, x0 = 0.5),
+          control=list(maxiter=2000, minFactor=.00000000001)),
+      error=function(err) NA
     )
     
   } else if(model == "exponential") {
@@ -560,7 +549,7 @@ growth_fit <- function(ts, date, model = "linear") {
     mod <- tryCatch(
       nls(ts ~ a * exp(r * date_scaled), data = df,
           start = list(a = 0.05, r = 2),
-          control = list(maxiter = 2000, minFactor = .00000000001)),
+          control=list(maxiter=2000, minFactor=.00000000001)),
       error = function(err) NA
     )
   } else {
@@ -585,10 +574,10 @@ decay_fit <- function(ts, date, model = "linear") {
   } else if(model == "logistic") {
     
     mod <- tryCatch(
-      nls(ts ~ max(df$ts) / (1 + exp(-r * (date_scaled - x0))), data = df,
-          start = list(r = -5, x0 = 0.5),
-          control = list(maxiter = 2000, minFactor = .00000000001)),
-      error = function(err) NA
+      nls(ts ~ max(df$ts)/(1 + exp(-r * (date_scaled - x0))), data=df,
+          start=list(r=-5, x0 = 0.5),
+          control=list(maxiter=2000, minFactor=.00000000001)),
+      error=function(err) NA
     )
     
   } else if(model == "exponential") {
@@ -596,7 +585,7 @@ decay_fit <- function(ts, date, model = "linear") {
     mod <- tryCatch(
       nls(ts ~ a * exp(r * date_scaled), data = df,
           start = list(a = max(ts), r = -2),
-          control = list(maxiter = 2000, minFactor = .00000000001)),
+          control=list(maxiter=2000, minFactor=.00000000001)),
       error = function(err) NA
     )
   } else {
@@ -610,14 +599,14 @@ decay_fit <- function(ts, date, model = "linear") {
 t1 <- Sys.time()
 tpw_growth_model <- tpw_fitting %>%
   filter(growth_leg) %>%
-  summarise(mod = list(growth_fit(ndvi_scaled, imgDate, "logistic")))
+  summarise(mod = list(growth_fit(msavi_scaled, imgDate, "logistic")))
 t2 <- Sys.time()
 cat("Fitting time - growth: ", t2 - t1)
 
 t1 <- Sys.time()
 tpw_decay_model <- tpw_fitting %>%
   filter(decay_leg) %>%
-  summarise(mod = list(decay_fit(ndvi_scaled, imgDate, "logistic")))
+  summarise(mod = list(decay_fit(msavi_scaled, imgDate, "logistic")))
 t2 <- Sys.time()
 cat("Fitting time - decay: ", t2 - t1)
 
@@ -686,35 +675,29 @@ decay_fitted <- tpw_decay_model %>%
 
 tpw_fitted <- tpw_fitting %>%
   ungroup() %>%
-  full_join(growth_fitted, by = c("plot_id", "hyear", "ndvi_scaled" = "ts")) %>%
-  full_join(decay_fitted, by = c("plot_id", "hyear", "ndvi_scaled" = "ts")) %>%
+  full_join(growth_fitted, by = c("plot_id", "hyear", "msavi_scaled" = "ts")) %>%
+  full_join(decay_fitted, by = c("plot_id", "hyear", "msavi_scaled" = "ts")) %>%
   select(-starts_with("growth"), -starts_with("decay")) %>%
   rename(growth = fitted_growth, decay = fitted_decay) %>%
   pivot_longer(cols = c(growth, decay),
-               names_to = "leg", values_to = "fitted") %>%
-  group_by(plot_id, hyear) %>%
-  mutate(fitted = fitted + min(ndvi_new))
+               names_to = "leg", values_to = "fitted")
 
 # Visualise
 tpw_fitted %>%
   filter(plot_id %in% sample_plots) %>%
-  group_by(hyear) %>%
-  mutate(fitted = fitted + min(ndvi_new)) %>%
   ggplot(aes(x = imgDate)) +
-  geom_line(aes(y = ndvi_new)) +
-  geom_line(aes(y = fitted, colour = leg), size = 2, alpha = 0.8) +
+  geom_line(aes(y = msavi_scaled)) +
+  geom_line(aes(y = fitted, colour = leg), size = 1.5, alpha = 0.8) +
   scale_colour_brewer(palette = "Dark2", direction = -1) +
   facet_wrap(~plot_id) +
-  theme_clean() +
-  scale_x_date(breaks = "1 year", date_labels = "%Y") +
-  ylim(0, 1) +
-  labs(x = "Date", y = "NDVI")
+  theme_bw() +
+  ylim(-0.1, 1)
 
 # Visualise growth/decay rate and growth/decay rate divided by ceiling
 
 all_params <- bind_rows("growth" = growth_params, "decay" = decay_params,
                         .id = "leg") %>%
-  pivot_wider(id_cols = c("plot_id", "hyear", "leg"),
+  pivot_wider(id_cols = c("plot_id", "hyear", "term", "leg"),
               names_from = term, values_from = estimate)
 
 all_params %>%
@@ -723,6 +706,7 @@ all_params %>%
   geom_histogram(colour = "black", alpha = 0.6, binwidth = 0.5, position = "identity") +
   scale_fill_brewer(palette = "Dark2", direction = -1) +
   geom_vline(xintercept = 0) +
+  xlim(-16, 16) +
   theme_clean() +
   labs(x = "Growth or decay rate", y = "Count")
 
@@ -748,23 +732,3 @@ From here, we could use these data in different ways:
 4.  We could compare some of these metrics to the field data TPW has
     collected, for example in order to test whether they allow us to
     predict ground cover or the presence of particular species.
-
-```{r yearly_metrics}
-
-tpw_yearly <- tpw_metrics %>%
-  group_by(plot_id) %>%
-  arrange(hyear) %>%
-  filter(max(peak_ndvi) < 1) %>%
-  mutate(lag_ppt = lag(season_ppt),
-         lag_auc = lag(ndvi_auc))
-
-
-ggplot(tpw_yearly, aes(x = season_ppt, y = ndvi_auc)) +
-  geom_point(aes(colour = as.factor(hyear)))
-
-ggplot(tpw_yearly, aes(x = lag_ppt, y = ndvi_auc)) +
-  geom_point(aes(colour = as.factor(hyear)))
-
-
-```
-

@@ -1,5 +1,5 @@
 ---
-title: "Tanzania People and Wildlife: Data Exploration and NDVI Time Series"
+title: "Enonkishu Conservancy NDVI time series example"
 author: "Guy Lomax"
 date: '2023-03-31'
 output:
@@ -7,10 +7,7 @@ output:
     df_print: paged
 ---
 
-## Introduction
-
-In this document, I generate smooth, high-resolution NDVI time series for
-Tanzania People and Wildlife rangeland monitoring plots from 2017-2022. 
+## Generating high-resolution NDVI time series
 
 Sentinel-2 provides global satellite imagery at 5-day intervals and at
 10-meter resolution, making it one of the most precise freely available
@@ -26,9 +23,11 @@ of individual sample plots or transects.
 
 Here, I have used the cloud-based platform Google Earth Engine to
 extract raw Sentinel-2 data from September 2017 to September 2022 for
-each of the TPW monitoring plots, and convert the raw data into a
-continuous NDVI time series that provide detailed insight into the
-patterns of vegetation productivity and change at TPW monitoring plots.
+a handful of grassland points in and around Enonkishu, and converted the raw
+data into a continuous NDVI time series. This time series can then be used to
+understand productivity, recovery rates and resilience of different areas, and
+could ultimately be embedded in a Google Earth Engine app that can map these
+changes across the landscape.
 
 ```{r setup, include = F}
 
@@ -50,30 +49,34 @@ tmap_mode("view")
 
 knitr::opts_chunk$set(
   comment = "#>",
-  echo = FALSE, warning = FALSE, message = FALSE, results = "hide",
+  echo = FALSE, warning = FALSE, message = FALSE,
   fig.keep = "all", fig.width = 8
 )
 
 ```
 
-
-## Extract Sentinel-2 NDVI time series data from Google Earth Engine
-
 I have selected six sample points in and around Enonkishu Conservancy to
 demonstrate the time series analysis. For each point, I have extracted the
-NDVI (Normalised Difference Vegetation Index) and MSAVI2 (Modified
-Soil-Adjusted Vegetation Index) values for all Sentinel-2 images
-intersecting the location from 2017-2022 at 10m resolution. I extracted the mean
-values across a circle of 50m radius centred on the plot location, including
-only pixels identified as grass/open ground rather than trees or shrubs.
+NDVI (Normalised Difference Vegetation Index) values for all Sentinel-2 images
+of that location from 2017-2022 at 10m resolution.
+
+The location of the points and the raw time series data are shown below:
 
 
 ```{r full_ts, cache = T}
 
-ts_all <- read_csv(here("data", "processed", "csv", "tpw",
-                        "enonkishuTSValues_all_l1c.csv")) %>%
-  select(-"system:index", -".geo") %>%
-  na_if(-99) %>%
+ts_all <- read_csv(here("data", "processed", "csv", "enonkishu",
+                        "laleenokTSValues_all_l1c.csv")) %>%
+  mutate(across(.cols = c("B2", "B3", "B4", "B8", "ndvi", "msavi"),
+                .fns = ~na_if(.x, -100))) %>%
+  mutate(across(.cols = c("B2", "B3", "B4", "B8", "ndvi", "msavi"),
+                .fns = function(x) (ifelse(maskFrac > 0.8, NA, x)))) %>%
+  mutate(across(.cols = c("B2", "B3", "B4", "B8", "ndvi", "msavi"),
+                .fns = function(x) (x + 100 * maskFrac) / (1 - maskFrac))) %>%
+  mutate(id = (substr(`system:index`, 1, 1) %>% as.numeric()) + 1,
+         id = LETTERS[id]) %>%
+  st_as_sf(coords = c("x", "y"), crs = 4326) %>%
+  select(-`system:index`, -.geo) %>%
   rename(blue = B2,
          green = B3,
          red = B4,
@@ -87,45 +90,39 @@ ts_all <- read_csv(here("data", "processed", "csv", "tpw",
 
 s <- hablar::s
 
-tpw_ts_unique <- tpw_ts_all %>%
-  group_by(plot_id, imgDate) %>%
+ts_unique <- ts_all %>%
+  group_by(id, imgDate) %>%
   summarise(blue = min(s(blue)), green = min(s(green)),
             red = min(s(red)), ir = min(s(ir)),
             ndvi = max(s(ndvi)), msavi = max(s(msavi)),
             lc = first(lc), precipitation = first(precipitation)) %>%
   ungroup()
 
-# Plot sample
-set.seed(0)
-plot_names <- unique(tpw_ts_unique$plot_id)
-sample_plots <- sample(plot_names, 6)
+# Plot points
 
-tpw_ts_unique %>%
-  filter(plot_id %in% sample_plots) %>%
+ts_points <- ts_unique %>%
+  group_by(id) %>%
+  slice(1)
+
+tm_shape(ts_points) + tm_dots(labels = "id", col = "yellow") +
+  tm_text(text = "id", xmod = 2, ymod = 2, col = "white") +
+  tm_view(set.view = 14) + tm_basemap(leaflet::providers$Esri.WorldImagery)
+
+ts_unique %>%
   ggplot(aes(x = imgDate, y = ndvi)) +
-  facet_wrap(~plot_id) +
-  geom_line() +
+  facet_wrap(~id) +
+  # geom_line() +
   geom_point(size = 0.5) +
   theme_clean() +
+  ylim(0, 0.8) +
   labs(x = "Date", y = "NDVI")
 
 
 ```
 
-As can be seen, the raw time series contains noise and many missing
-values due to cloud cover and variable atmospheric conditions. We can
-fill these gaps using an intelligent smoothing approach to create a
-continuous time series that approximates the true time series values
-(based on Chen et al. 2004). The method relies on two facts: (a) Real
-NDVI tends to change smoothly, without abrupt spikes or drops. (b) Cloud
-cover and other disturbances tend to reduce NDVI values compared to
-their true values.
-
-This means that we can make a best guess of the "true" value by fitting
-a curve to the upper envelope of the time series. To do this we use a
-Savitzky-Golay filter, which smooths out the jagged noise in the time
-series, and use it to boost unusually low values in the time series
-towards the upper envelope.
+The raw data is quite noisy and has some missing values due to cloud cover, but
+we can clean this up by using an intelligent smoothing method that reconstructs
+the original, smooth values.
 
 ```{r gapfilling, cache = T, dependson= "full_ts"}
 
@@ -137,12 +134,12 @@ towards the upper envelope.
 # 5 days (assume cloud)
 # Then fill these gaps with another linear interpolation
 
-tpw_all_int <- tpw_ts_unique %>%
-  group_by(plot_id) %>%
+all_int <- ts_unique %>%
+  group_by(id) %>%
   arrange(imgDate) %>%
   mutate(ndvi_int = na_interpolation(ndvi),
-         ndvi_spike = (lead(ndvi_int) - ndvi_int > 0.1),
-         ndvi_drop = (lag(ndvi_int) - ndvi_int > 0.1),
+         ndvi_spike = (lead(ndvi_int) - ndvi_int > 0.05),
+         ndvi_drop = (lag(ndvi_int) - ndvi_int > 0.05),
          ndvi_int = na_if(ndvi_int, ((ndvi_spike | ndvi_drop) * ndvi)),
          ndvi_int = na_interpolation(ndvi_int)) %>%
   select(-ndvi_spike, -ndvi_drop)
@@ -174,18 +171,18 @@ tpw_all_int <- tpw_ts_unique %>%
 #   opt
 # }
 
-# tpw_sg1_opt <- tpw_all_int %>%
-#   group_by(plot_id) %>%
+# sg1_opt <- all_int %>%
+#   group_by(id) %>%
 #   mutate(opt = find_least_error(ndvi_int))
 
-tpw_sg1 <- tpw_all_int %>%
-  group_by(plot_id) %>%
-  mutate(ndvi_filtered = sgolayfilt(ndvi_int, p = 3, n = 25))
+sg1 <- all_int %>%
+  group_by(id) %>%
+  mutate(ndvi_filtered = sgolayfilt(ndvi_int, p = 2, n = 25))
 
 # Assign weights to NDVI values in original (interpolated) series based on
 # whether they fall above or below the trend curve for that TS.
 
-tpw_weights <- tpw_sg1 %>%
+weights <- sg1 %>%
   mutate(dist = ndvi_filtered - ndvi_int,
          max_dist = max(dist),
          weight = ifelse(dist > 0, 1 - (dist / max_dist), 1))
@@ -204,7 +201,7 @@ iterative_fit <- function(ndvi_1, ndvi_0, weight) {
     initial_fit <- new_fit
     
     ndvi_new <- ifelse(ndvi_new >= ndvi_0, ndvi_new, ndvi_0) %>%
-    sgolayfilt(p = 4, n = 15)
+    sgolayfilt(p = 3, n = 21)
   
   new_fit <- sum(abs(ndvi_new - ndvi_0) * weight)
   }
@@ -213,72 +210,93 @@ iterative_fit <- function(ndvi_1, ndvi_0, weight) {
 
 # Iterate to get final time series
 
-tpw_final <- tpw_weights %>%
+final <- weights %>%
   mutate(ndvi_new = iterative_fit(ndvi_filtered, ndvi_int, weight)) %>%
   select(-dist, -max_dist, -weight, -ndvi_int, -ndvi_filtered)
 
-# tpw_final %>%
-#   filter(plot_id %in% sample_plots) %>%
+# final %>%
+#   filter(id %in% sample_plots) %>%
 #   pivot_longer(cols = c("ndvi_int", "ndvi_filtered", "ndvi_new"),
 #                names_to = "var", values_to = "value") %>%
 #   ggplot() +
 #   geom_line(aes(x = imgDate, y = value, colour = var)) +
-#   facet_wrap(~plot_id) +
+#   facet_wrap(~id) +
 #   theme_bw() +
 #   scale_x_date(breaks = "6 months", minor_breaks = "3 month") +
 #   ylim(0, 1) +
 #   theme(legend.position="none",
 #         axis.text.x = element_text(angle = 60, vjust = 0.5, hjust=1))
 
-tpw_final %>%
-  filter(plot_id %in% sample_plots) %>%
+smooth_ndvi <- final %>%
+  filter(id == "B") %>%
   ggplot(aes(x = imgDate)) +
   # geom_col(aes(y = precipitation / max(precipitation)), fill = "blue") +
-  geom_line(aes(y = ndvi_new), colour = "green", size = 1) +
-  geom_point(aes(y = ndvi), colour = "grey40", size = 0.5) +
+  geom_point(aes(y = ndvi), colour = "white", size = 1) +
+  geom_line(aes(y = ndvi_new), colour = "white", size = 1.5) +
   # geom_line(aes(y = ndvi), colour = "grey40") +
-  facet_wrap(~plot_id) +
+  # facet_wrap(~plot_id) +
   theme_clean() +
-  # scale_x_date(breaks = "6 months", minor_breaks = "3 month") +
+  scale_x_date(breaks = "1 year", date_labels = "%Y") +
   ylim(0, 1) +
-  # theme(axis.text.x = element_text(angle = 60, vjust = 0.5, hjust=1)) +
+  theme(rect = element_rect(fill = "transparent", linewidth = 0)) +
+  theme(axis.text.x = element_text(colour = "transparent", size = 24),
+        axis.text.y = element_text(colour = "white", size = 24),
+        axis.title.x = element_text(colour = "transparent", size = 28),
+        axis.title.y = element_text(colour = "white", size = 28),
+        axis.line.x = element_line(colour = "transparent", linewidth = 2),
+        axis.line.y = element_line(colour = "white", linewidth = 2),
+        axis.ticks.x = element_line(colour = "transparent", linewidth = 2),
+        axis.ticks.y = element_line(colour = "transparent", linewidth = 2),
+        panel.grid.major.y = element_line(colour = "white", linewidth = 1),
+        panel.grid.major.x = element_line(colour = "white", linewidth = 0.5, linetype = "dotted")) +
   labs(x = "Date", y = "NDVI")
+
+smooth_ndvi
+
+ggsave(here("results", "figures", "smooth_ndvi.png"),
+       smooth_ndvi,
+       width = 24, height = 12, units = "cm", dpi = 600,
+       bg = "transparent")
+
+
+
+
 
 ```
 
 The grey shows the original data, while the green shows the smoothed
-version. It isn't perfect - it still tends to give a spiky pattern when
-there is a lot of noise or not much data (e.g., in Orkoliliy) - but it
-is a big improvement on the original data. I am continuing to refine
-this.
+version. You can now clearly see the annual cycle, and the differences
+between sites. For example, you can see that site F (which I think is in the
+unmanaged/unrestricted grazing area) has lower average NDVI and also seems to
+have a bigger/faster drop from the peaks to the valleys.
 
-The annual seasonal cycle is very clearly visible, and you can clearly
-see the differences between sites like Enguko and those like Orkoliliy.
-The smoother also preserves the overall shape of the increase at the
-start of each wet season and the subsequent decrease.
+We can use these curves to extract some useful measures, such as productivity,
+rain use efficiency and recovery rate.
 
-## Extracting vegetation metrics from satellite data
+## Extracting NDVI recovery and decay rates from satellite data
 
-From these curves, we can start to extract some potentially useful
-metrics to track land health, degradation and resilience. A few we might
-be interested in are:
+Two things we might be interested in are how rapidly vegetation grows at the
+start of the rainy season, and how quickly it stops growing and senesces at the
+end of the season. We can estimate this from the data by fitting simple
+statistical models to the start and end of the seasonal curves. The blue is for
+models fitted to the growth phase and the brown for the browning/decay phase.
+Sometimes the model doesn't fit properly or fits the wrong part of the curve,
+but generally it works quite well.
 
-1.  The peak greenness each year compared to baseline.
-2.  The overall area below the curve, a proxy for productivity.
-3.  The relationship between these values and rainfall.
 
 ```{r metrics, cache = T, dependson = c("full_ts", "gapfilling")}
 
-tpw_hyear <- tpw_final %>%
+hyear <- final %>%
   mutate(hyear = year(imgDate + dmonths(4))) %>%
-  filter(hyear > 2016)
+  filter(hyear > 2016) %>%
+  st_drop_geometry()
 
-tpw_metrics <- tpw_hyear %>%
-  group_by(plot_id) %>%
+metrics <- hyear %>%
+  group_by(id) %>%
   mutate(min_ndvi = min(ndvi_new),
          ndvi_pc10 = quantile(ndvi_new, 0.1),
          growing_season = ndvi_new > ndvi_pc10) %>%
-  group_by(plot_id, hyear) %>%
+  group_by(id, hyear) %>%
   summarise(min_ndvi = first(min_ndvi),
             seasonal_min_ndvi = min(ndvi_new),
             peak_ndvi = max(ndvi_new) - min_ndvi,
@@ -286,26 +304,33 @@ tpw_metrics <- tpw_hyear %>%
               (sum(growing_season) * min_ndvi),
             season_ppt = sum(precipitation * growing_season))
 
-tpw_hyear %>%
-  filter(plot_id %in% sample_plots) %>%
-  group_by(plot_id) %>%
-  mutate(ppt_scaled = precipitation / max(precipitation, na.rm = T)) %>%
+ppt_plot <- hyear %>%
   ggplot(aes(x = imgDate)) +
-  geom_line(aes(y = ndvi_new), colour = "green") +
-  geom_point(aes(y = ndvi), colour = "grey", size = 0.2) +
-  geom_col(aes(y = ppt_scaled), alpha = 0.5) +
-  facet_wrap(~plot_id) +
-  ylim(0, 1) +
+  # geom_line(aes(y = ndvi_new), colour = "green") +
+  # geom_point(aes(y = ndvi), colour = "grey", size = 0.2) +
+  geom_col(aes(y = precipitation), colour = "white") +
+  scale_x_date(breaks = "1 year", date_labels = "%Y") +
+  # scale_y_continuous(position = "right") +
+  # facet_wrap(~id) +
+  # ylim(0, 1) +
   theme_clean() +
-  labs(x = "Date", y = "NDVI",
-       title = "NDVI relative to rainfall timing and amount",
-       subtitle = "Columns represent dates of rainfall")
+  theme(rect = element_rect(fill = "transparent", linewidth = 0)) +
+  theme(axis.text.x = element_text(colour = "white", size = 24),
+        axis.text.y = element_text(colour = "white", size = 24),
+        axis.title.x = element_text(colour = "white", size = 28),
+        axis.title.y = element_text(colour = "white", size = 28),
+        axis.line.x = element_line(colour = "white", linewidth = 2),
+        axis.line.y = element_line(colour = "white", linewidth = 2),
+        axis.ticks.x = element_line(colour = "transparent", linewidth = 2),
+        axis.ticks.y = element_line(colour = "transparent", linewidth = 2),
+        panel.grid.major.y = element_line(colour = "white", linewidth = 1),
+        panel.grid.major.x = element_line(colour = "white", linewidth = 0.5, linetype = "dotted")) +
+  labs(x = "Date", y = "Precipitation")
 
-# tpw_metrics %>%
-#   filter(plot_id %in% sample_plots) %>%
-#   ggplot(aes(x = season_ppt, y = ndvi_auc, colour = plot_id, shape = plot_id)) +
+# metrics %>%
+#   ggplot(aes(x = season_ppt, y = ndvi_auc, colour = as.factor(id), shape = as.factor(id))) +
 #   geom_point() +
-#   geom_smooth(method = "lm", se = FALSE, show.legend = FALSE) +
+#   # geom_smooth(method = "lm", se = FALSE, show.legend = FALSE) +
 #   # geom_line(size = 0.2) +
 #   theme_bw() +
 #   labs(x = "Seasonal rainfall (mm)",
@@ -315,37 +340,30 @@ tpw_hyear %>%
 #        title = "Relationship between NDVI and rainfall",
 #        subtitle = "Slope of line is the rain use efficiency of the plot")
 
+
+ggsave(here("results", "figures", "rainfall_example.png"),
+       ppt_plot,
+       width = 24, height = 12, units = "cm", dpi = 600,
+       bg = "transparent")
+
+combined_plot <- ggpubr::ggarrange(smooth_ndvi, ppt_plot,
+                                   nrow = 2, ncol = 1, align = "v")
+
+ggsave(here("results", "figures", "combined_example.png"),
+       combined_plot,
+       width = 24, height = 24, units = "cm", dpi = 600,
+       bg = "transparent")
+
 ```
 
-Another indicator of interest may be the recovery rate and decay rate of
-NDVI at the start or end of the season. More rapid recovery and greater
-persistence of green vegetation in the dry season may be associated with
-greater vegetation resilience and the presence of perennial grasses and
-herbs in addition to annual species.
-
-We can quantify this for each site by fitting growth and decay curves to
-the NDVI profile for each year.
-
-In the section below, the first figure shows an example of models fitted
-to the growth phase (start of the growing season) and the decay phase
-(end of the growing season). In some cases, the model hasn't been able
-to fit the shape of the curve, because the shape is irregular.
-
-Fitting these statistical models to the data allows us to extract the
-growth rate and decay rate of each season as a single number. We can
-then use these growth rates to explore how plots are changing over time,
-and examine whether this is driven by rainfall or other factors (like
-change in vegetation). The second figure shows the distribution of
-growth rates and decay rates for all the plots over the period
-2017-2022.
 
 ```{r growth_decay_models, cache = T,dependson = c("full_ts", "gapfilling", "metrics")}
 
 # Take first and second derivatives to identify maxima and minima in time series
 # First smooth with cubic splines to reduce noise in derivatives
-tpw_derivatives <- tpw_hyear %>%
-  select(plot_id, hyear, imgDate, ndvi, ndvi_new) %>%
-  group_by(plot_id) %>%
+derivatives <- hyear %>%
+  select(id, hyear, imgDate, ndvi, ndvi_new) %>%
+  group_by(id) %>%
   arrange(imgDate) %>%
   mutate(ndvi_smooth = smooth.spline(imgDate, ndvi_new)$y) %>%
   mutate(ndvi_1d = (lag(ndvi_new) - lead(ndvi_new)) / as.numeric(lag(imgDate) - lead(imgDate)),
@@ -358,7 +376,7 @@ tpw_derivatives <- tpw_hyear %>%
 # Since 1st derivative won't be exactly zero in discrete time series, look for
 # where 1st derivative undergoes a change in sign
 
-tpw_max_min <- tpw_derivatives %>%
+max_min <- derivatives %>%
   mutate(is_max = (ndvi_1ds * lag(ndvi_1ds) < 0) & (ndvi_2ds < 0),
          is_min = (ndvi_1ds * lag(ndvi_1ds) < 0) & (ndvi_2ds > 0))
 
@@ -366,7 +384,7 @@ tpw_max_min <- tpw_derivatives %>%
 # between subsequent maxima/minima
 
 # 1. Create data frame of only max and min rows (including NDVI, imgDate and
-#    plot_id) arranged by imgDate
+#    id) arranged by imgDate
 # 2. Calculate NDVI differences between rows
 # 3. Extract imgDate for min value (largest drop =, i.e., decay) and max value
 #    (largest increase, i.e., recovery)
@@ -375,23 +393,23 @@ tpw_max_min <- tpw_derivatives %>%
 # maxima (end of growth segment and start of decay) and then find the minima
 # before and after, respectively
 
-tpw_events <- tpw_max_min %>%
+events <- max_min %>%
   filter(is_max | is_min) %>%
-  select(plot_id, imgDate, hyear, ndvi_new, ndvi_smooth, is_max, is_min) %>%
+  select(id, imgDate, hyear, ndvi_new, ndvi_smooth, is_max, is_min) %>%
   mutate(lead_diff = lead(ndvi_new) - ndvi_new,
          lag_diff = lag(ndvi_new) - ndvi_new,
          next_imgDate = lead(imgDate),
          prev_imgDate = lag(imgDate)) %>%
-  group_by(plot_id, hyear) %>%
+  group_by(id, hyear) %>%
   summarise(growth_start = prev_imgDate[which.min(lag_diff)],
             growth_end = imgDate[which.min(lag_diff)],
             decay_start = imgDate[which.min(lead_diff)],
             decay_end = next_imgDate[which.min(lead_diff)])
 
 # Join with original time series for fitting
-tpw_fitting <- tpw_hyear %>%
-  left_join(tpw_events) %>%
-  group_by(plot_id, hyear) %>%
+fitting <- hyear %>%
+  left_join(events) %>%
+  group_by(id, hyear) %>%
   mutate(ndvi_scaled = ndvi_new - min(ndvi_new)) %>%
   mutate(growth_leg = (imgDate >= growth_start & imgDate <= growth_end),
          decay_leg = (imgDate >= decay_start & imgDate <= decay_end))
@@ -413,10 +431,10 @@ growth_fit <- function(ts, date, model = "linear") {
   } else if(model == "logistic") {
     
     mod <- tryCatch(
-      nls(ts~K/(1+exp(-r*(date_scaled - x0))), data=df,
-          start=list(K=max(df$ts), r=5, x0 = 0.5),
-          control=list(maxiter=2000, minFactor=.00000000001)),
-      error=function(err) NA
+      nls(ts ~ max(df$ts) / (1 + exp(-r * (date_scaled - x0))), data = df,
+          start = list(r = 5, x0 = 0.5),
+          control = list(maxiter = 2000, minFactor = .00000000001)),
+      error = function(err) NA
     )
     
   } else if(model == "exponential") {
@@ -424,7 +442,7 @@ growth_fit <- function(ts, date, model = "linear") {
     mod <- tryCatch(
       nls(ts ~ a * exp(r * date_scaled), data = df,
           start = list(a = 0.05, r = 2),
-          control=list(maxiter=2000, minFactor=.00000000001)),
+          control = list(maxiter = 2000, minFactor = .00000000001)),
       error = function(err) NA
     )
   } else {
@@ -449,10 +467,10 @@ decay_fit <- function(ts, date, model = "linear") {
   } else if(model == "logistic") {
     
     mod <- tryCatch(
-      nls(ts~K/(1+exp(-r*(date_scaled - x0))), data=df,
-          start=list(K=max(df$ts), r=-5, x0 = 0.5),
-          control=list(maxiter=2000, minFactor=.00000000001)),
-      error=function(err) NA
+      nls(ts ~ max(df$ts) / (1 + exp(-r * (date_scaled - x0))), data = df,
+          start = list(r = -5, x0 = 0.5),
+          control = list(maxiter = 2000, minFactor = .00000000001)),
+      error = function(err) NA
     )
     
   } else if(model == "exponential") {
@@ -460,7 +478,7 @@ decay_fit <- function(ts, date, model = "linear") {
     mod <- tryCatch(
       nls(ts ~ a * exp(r * date_scaled), data = df,
           start = list(a = max(ts), r = -2),
-          control=list(maxiter=2000, minFactor=.00000000001)),
+          control = list(maxiter = 2000, minFactor = .00000000001)),
       error = function(err) NA
     )
   } else {
@@ -472,14 +490,14 @@ decay_fit <- function(ts, date, model = "linear") {
 
 # Apply functions to each site and hydrological year
 t1 <- Sys.time()
-tpw_growth_model <- tpw_fitting %>%
+growth_model <- fitting %>%
   filter(growth_leg) %>%
   summarise(mod = list(growth_fit(ndvi_scaled, imgDate, "logistic")))
 t2 <- Sys.time()
 cat("Fitting time - growth: ", t2 - t1)
 
 t1 <- Sys.time()
-tpw_decay_model <- tpw_fitting %>%
+decay_model <- fitting %>%
   filter(decay_leg) %>%
   summarise(mod = list(decay_fit(ndvi_scaled, imgDate, "logistic")))
 t2 <- Sys.time()
@@ -493,21 +511,21 @@ tidy <- function(mod) {
     broom::tidy(mod)
   }
 }
-growth_params <- tpw_growth_model %>%
+growth_params <- growth_model %>%
   mutate(params = map(mod, tidy)) %>%
   unnest(params) %>%
   mutate(pc_error = std.error / estimate * 100)
 
-growth_performance <- tpw_growth_model %>%
+growth_performance <- growth_model %>%
   mutate(glance = tryCatch(map(mod, broom::glance), error = function(err) NA)) %>%
   unnest(glance)
 
-decay_params <- tpw_decay_model %>%
+decay_params <- decay_model %>%
   mutate(params = map(mod, tidy)) %>%
   unnest(params) %>%
   mutate(pc_error = std.error / estimate * 100)
 
-decay_performance <- tpw_decay_model %>%
+decay_performance <- decay_model %>%
   mutate(glance = tryCatch(map(mod, broom::glance), error = function(err) NA)) %>%
   unnest(glance)
 
@@ -516,8 +534,8 @@ decay_performance <- tpw_decay_model %>%
 # mean(decay_performance$sigma)
 # median(decay_performance$sigma)
 # 
-# sum(is.na(tpw_growth_model$mod))
-# sum(is.na(tpw_decay_model$mod))
+# sum(is.na(growth_model$mod))
+# sum(is.na(decay_model$mod))
 
 ```
 
@@ -532,14 +550,14 @@ augment <- function(mod) {
   }
 }
 
-growth_fitted <- tpw_growth_model %>%
+growth_fitted <- growth_model %>%
   mutate(values = map(mod, augment)) %>%
   unnest(values) %>%
   select(-mod, -date_scaled) %>%
   rename(fitted_growth = .fitted,
          resids_growth = .resid)
 
-decay_fitted <- tpw_decay_model %>%
+decay_fitted <- decay_model %>%
   mutate(values = map(mod, augment)) %>%
   unnest(values) %>%
   select(-mod, -date_scaled) %>%
@@ -548,56 +566,73 @@ decay_fitted <- tpw_decay_model %>%
 
 # Combine growth and decay fitted values with original data frame
 
-tpw_fitted <- tpw_fitting %>%
+fitted <- fitting %>%
   ungroup() %>%
-  full_join(growth_fitted, by = c("plot_id", "hyear", "ndvi_scaled" = "ts")) %>%
-  full_join(decay_fitted, by = c("plot_id", "hyear", "ndvi_scaled" = "ts")) %>%
+  full_join(growth_fitted, by = c("id", "hyear", "ndvi_scaled" = "ts")) %>%
+  full_join(decay_fitted, by = c("id", "hyear", "ndvi_scaled" = "ts")) %>%
   select(-starts_with("growth"), -starts_with("decay")) %>%
   rename(growth = fitted_growth, decay = fitted_decay) %>%
   pivot_longer(cols = c(growth, decay),
-               names_to = "leg", values_to = "fitted")
+               names_to = "leg", values_to = "fitted") %>%
+  group_by(id, hyear) %>%
+  mutate(fitted = fitted + min(ndvi_new, na.rm = TRUE))
 
 # Visualise
-tpw_fitted %>%
-  filter(plot_id %in% sample_plots) %>%
+fitted %>%
   ggplot(aes(x = imgDate)) +
-  geom_line(aes(y = ndvi_scaled)) +
+  geom_line(aes(y = ndvi_new)) +
   geom_line(aes(y = fitted, colour = leg), size = 1.5, alpha = 0.8) +
   scale_colour_brewer(palette = "Dark2", direction = -1) +
-  facet_wrap(~plot_id) +
-  theme_bw() +
-  ylim(-0.1, 1)
+  facet_wrap(~id) +
+  theme_clean() +
+  ylim(-0.1, 1) +
+  labs(x = "Date", y = "NDVI", colour = "Phase")
 
 # Visualise growth/decay rate and growth/decay rate divided by ceiling
 
 all_params <- bind_rows("growth" = growth_params, "decay" = decay_params,
                         .id = "leg") %>%
-  pivot_wider(id_cols = c("plot_id", "hyear", "term", "leg"),
+  pivot_wider(id_cols = c("id", "hyear", "leg"),
               names_from = term, values_from = estimate)
 
+# all_params %>%
+#   filter((leg == "growth" & r > 0) | (leg == "decay" & r < 0)) %>%
+#   ggplot(aes(x = r, fill = leg)) +
+#   geom_histogram(colour = "black", alpha = 0.6, binwidth = 0.5, position = "identity") +
+#   scale_fill_brewer(palette = "Dark2", direction = -1) +
+#   geom_vline(xintercept = 0) +
+#   theme_clean() +
+#   labs(x = "Growth or decay rate", y = "Count")
+
+# all_params %>%
+#   filter((leg == "growth" & r > 0) | (leg == "decay" & r < 0)) %>%
+#   mutate(r = abs(r)) %>%
+#   ggplot(aes(x = as.factor(id), y = r, colour = leg)) +
+#   geom_boxplot() +
+#   theme_clean()
+
 all_params %>%
-  filter((leg == "growth" & r > 0) | (leg == "decay" & r < 0)) %>%
-  ggplot(aes(x = r, fill = leg)) +
-  geom_histogram(colour = "black", alpha = 0.6, binwidth = 0.5, position = "identity") +
-  scale_fill_brewer(palette = "Dark2", direction = -1) +
-  geom_vline(xintercept = 0) +
-  theme_clean() +
-  labs(x = "Growth or decay rate", y = "Count")
+  group_by(id, leg) %>%
+  summarise(r = abs(mean(r))) %>%
+  pivot_wider(id_cols = id, names_from = leg, values_from = r) %>%
+  rename("Point ID" = id,
+         "Average decay rate" = decay,
+         "Average growth rate" = growth) %>%
+  mutate(across(everything(), ~signif(.x, 3))) %>%
+  knitr::kable()
 
 
 ```
 
-From here, we could use these data in different ways:
+From here, we could use these data in a few different ways:
 
-1.  We could look at changes over time in greenness, in recovery/decay
-    rates or in other metrics like rain use efficiency, to explore which
-    plots or areas are improving or deteriorating over time.
+1.  We could compare some of these metrics between different grazing blocks or
+    look at how boma placement is affecting the vegetation.
 2.  We could examine the drivers behind the differences in growth or
     decay rates, for example distinguishing the effects of rainfall,
     soil type or management.
 3.  We could compare these metrics between regions with similar areas
-    outside the regions that TPW works in, for example to better
-    understand impact.
-4.  We could compare some of these metrics to the field data TPW has
-    collected, for example in order to test whether they allow us to
-    predict ground cover or the presence of particular species.
+    outside Enonkishu to understand or demonstrate impact.
+4.  We could compare these metrics to field vegetation monitoring data to see if
+    it is able to capture other metrics of interest on the ground.
+    
