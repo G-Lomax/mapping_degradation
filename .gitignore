@@ -40,3 +40,6 @@ vignettes/*.pdf
 
 # Data files (saved elsewhere)
 /data/
+
+# Results files and figures
+/results/
