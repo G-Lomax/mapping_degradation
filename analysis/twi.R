@@ -4,6 +4,7 @@
 ## G.Lomax@exeter.ac.uk
 
 library(raster)
+library(terra)
 library(sf)
 library(tidyverse)
 library(tmap)
@@ -14,24 +15,29 @@ whitebox::wbt_init()
 
 tmap_mode("view")
 
-# Load data
+# Load data and join
 
-dem <- raster(here("data", "raw", "raster", "srtm",
-                   "srtm_sa.tif"))
+# dem_paths <- Sys.glob(here("data", "raw", "raster", "srtm", "*.tif"))
+# 
+# dem_segments <- lapply(dem_paths, raster)
+# 
+# dem <- do.call(merge, dem_segments)
+# 
+# writeRaster(dem, here("data", "processed", "raster", "srtm", "srtm_ke_tz.tif"))
 
-bbox <- st_bbox(c(xmin = 35.5, xmax = 36.5, ymin = -2, ymax = -1.5))
-
-dem_zoom <- crop(dem, bbox)
+dem <- raster(here("data", "processed", "raster", "srtm", "srtm_ke_tz.tif"))
 
 # Fill depressions
 
+
+Sys.time()
 wbt_breach_depressions_least_cost(
-  dem = here("data", "raw", "raster", "srtm",
-             "srtm_sa.tif"),
-  output = here("data", "processed", "raster", "srtm",
-                "srtm_sa_breached.tif"),
-  dist = 5,
+  dem = here("data", "processed", "raster", "srtm", "srtm_ke_tz.tif"),
+  output = here("data", "processed", "raster", "srtm", "srtm_ke_tz_breached.tif"),
+  dist = 10,
   fill = FALSE)
+Sys.time()
+
 
 wbt_fill_depressions(
   dem = here("data", "processed", "raster", "srtm",
