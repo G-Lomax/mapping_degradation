@@ -20,16 +20,20 @@ library(here)
 # Analysis
 library(qgam)
 library(parallel)
+library(furrr)
+
+# Convenience/timing
+library(tictoc)
 library(beepr)
 
 # Visualisation
 library(tmap)
 library(gratia)
 library(mgcViz)
-library(ggtern)
 
-nc <- 4
-cl <- makeCluster(nc)
+# Set up parallel computing
+nc <- detectCores() - 1
+plan(multisession, workers = nc)
 
 tmap_options(check.and.fix = TRUE)
 
@@ -55,6 +59,10 @@ ecoregions <- st_read(here("data", "raw", "vector", "coarse", "Ecoregions2017",
 rangeland_ecoregions <- filter(ecoregions, ECO_ID %in% c(50, 51, 55, 57)) %>%
   mutate(ECO_NAME = str_replace(ECO_NAME, "Commiphora ", "Commiphora\n"))
 
+protected_areas <- st_read(here("data", "raw", "vector", "protected_areas",
+                                "terrestrialPAsKeTz.geojson")) %>%
+  select(NAME, DESIG_ENG, IUCN_CAT, geometry, STATUS, STATUS_YR)
+
 # rangeland_ecoregions_ke_tz <- st_intersection(rangeland_ecoregions, ke_tz)
 
 ```
@@ -67,14 +75,19 @@ sample_points <- sample_points_raw %>%
          y = st_coordinates(geometry)[,2]) %>%
   bind_cols(twi) %>%
   mutate(meanT = meanT * 0.1) %>%
-  rename(riverDist = first,
-         twi = hydrosheds_twi_fd8) %>%
+  rename(twi = hydrosheds_twi_fd8) %>%
   pivot_longer(cols = starts_with(c("GPP","precipitation", "tMean", "parMean")),
                names_to = "index", values_to = "value") %>%
   separate_wider_delim(index, "_", names = c("data", "year")) %>%
   pivot_wider(names_from = data, values_from = value) %>%
   mutate(year = as.numeric(year)) %>%
-  filter(GPP > 0)
+  group_by(id) %>%
+  filter(all(GPP > 0)) %>%
+  ungroup() %>%
+  st_drop_geometry() %>%
+  select(-geometry)
+
+nrow(sample_points) / 19
 
 # Merge tree and shrub fractions into "woody" fraction
 
@@ -87,7 +100,7 @@ sample_points_woody <- sample_points %>%
 
 # Exploratory data analysis
 
-```{r eda}
+```{r eda, eval = FALSE}
 
 # Study area map
 
@@ -96,8 +109,6 @@ tm_shape(ke_tz) + tm_borders() +
   tm_shape(sample_points_raw) + tm_dots(col = "brown")
 
 # Relative fractions of trees, shrubs, grass
-
-ggtern(sample_points) + geom_point(aes(x = grassland, y = shrubland, z = trees), size = 0.1)
 
 sum(sample_points$shrubland > 0.8) / nrow(sample_points)
 
@@ -123,347 +134,478 @@ sample_points_woody %>%
   theme_bw()
 
 ```
-Test simple GAMs exploring relationships between MAP, T, soil and GPP
 
-```{r gam_test}
+
+Fit complete GAM (all variables) for different fractions of woody cover
+
+```{r gam_fit}
 
 # Split dataset into different fractions of grass (20% intervals)
 
 sample_points_binned <- sample_points_woody %>%
   mutate(woody_bin = cut_interval(woody, 5)) %>%
-  arrange(precipitation)
+  arrange(woody_bin, precipitation) %>%
+  group_by(id) %>%
+  mutate(mean_ppt = mean(precipitation),
+         ppt_anomaly = precipitation / mean(precipitation)) %>%
+  ungroup()
 
-summary(sample_points_binned)
+# # Run separate GAM with all variables on each 20% interval
+bins <- unique(sample_points_binned$woody_bin)
+models <- tibble(bin = bins, model = NA)
+quantile <- 0.9
 
-# Simple qgam with only precipitation
-
-ppt_gam1 <- qgam(GPP ~ s(precipitation, bs = "ts", k = 16),
-                 qu = 0.9,
-                 data = sample_points_binned)
-
-plot(sample_points_binned$precipitation, sample_points_binned$GPP, col = "grey")
-tmp1 <- predict(ppt_gam1, se = TRUE)
-lines(sample_points_binned$precipitation, tmp1$fit, lwd = 1.5)
-lines(sample_points_binned$precipitation, tmp1$fit + 3 * tmp1$se.fit, col = 2)
-lines(sample_points_binned$precipitation, tmp1$fit - 3 * tmp1$se.fit, col = 2)
-
-# Allow credible interval to vary with ppt
-
-ppt_gam2 <- qgam(list(GPP ~ s(precipitation, bs = "ts", k = 16),
-                      ~s(precipitation, bs = "ts", k = 16)),
-                 qu = 0.9,
-                 data = sample_points_binned)
-
-plot(sample_points_binned$precipitation, sample_points_binned$GPP, col = "grey")
-tmp2 <- predict(ppt_gam2, se = TRUE)
-lines(sample_points_binned$precipitation, tmp2$fit, lwd = 1.5)
-lines(sample_points_binned$precipitation, tmp2$fit + 3 * tmp2$se.fit, col = 2)
-lines(sample_points_binned$precipitation, tmp2$fit - 3 * tmp2$se.fit, col = 2)
-
-# Slight change
-# Now include MAT
-
-climate_gam1 <- qgam(list(GPP ~ s(precipitation, bs = "ts", k = 16) + s(meanT, bs = "ts", k = 12),
-                          ~ s(precipitation, bs = "ts", k = 16) + s(meanT, bs = "ts", k = 12)),
-                     qu = 0.9,
-                     data = sample_points_binned)
-
-plot.gam(climate_gam1, seWithMean = T, pages = 1)
-
-cqcheck(climate_gam1, v = c("precipitation"))
-
-# Include year as a separate smooth
-
-climate_gam2 <- qgam(list(GPP ~ s(precipitation, bs = "ts", k = 16) + s(meanT, bs = "ts", k = 12) + s(year, bs = "ts", k = 8),
-                          ~ s(precipitation, bs = "ts", k = 16) + s(meanT, bs = "ts", k = 12)),
-                     qu = 0.9,
-                     data = sample_points_binned)
-
-
-# All variables, no variable error rate
-
-all_gam1 <- qgam(GPP ~ s(precipitation, bs = "ts", k = 24) +
-                        s(tMean, bs = "ts", k = 12) +
-                        s(parMean, bs = "ts", k = 12) +
-                        s(sand, bs = "ts", k = 12) +
-                        s(log(slope + 0.01), bs = "ts", k = 12) +
-                        as.factor(landform) +
-                        s(twi, bs = "ts", k = 12) +
-                        s(year, bs = "ts", k = 8) +
-                        te(x, y, bs = "cs", k = c(12, 12)),
-                 qu = 0.9,
-                 data = sample_points_binned,
-                 multicore = T
-)
-
-# Visualisation
-
-# Partial effect plots
-plot(all_gam1,
-     seWithMean = T, shift = coef(all_gam1)[1],
-     rug = F,
-     pages = 1,
-     shade = T, shade.col = "lightgreen",
-     scheme = 3)
-
-
-# Partial residual plot
-ppt_smooth_1 <- get_smooth(all_gam1, "s(precipitation)") %>%
-  eval_smooth(all_gam1, data = sample_points_binned) %>%
-  select(data) %>%
-  unnest(data) %>%
-  mutate(ppt_smooth_pred = est + coef(all_gam1)[1],
-         lower = ppt_smooth_pred - 1.96 * se,
-         upper = ppt_smooth_pred + 1.96 * se)
-
-df_smooths_1 <- sample_points_binned %>%
-  arrange(precipitation) %>%
-  select(-precipitation) %>%
-  bind_cols(ppt_smooth_1) %>%
-  filter(!is.na(twi)) %>%
-  mutate(fitted = predict(all_gam1),
-         resids = residuals(all_gam1, type = "response"))
-  
-
-ggplot(df_smooths_1, aes(x = precipitation)) +
-  geom_ribbon(aes(ymin = lower, ymax = upper), fill = "lightgreen") +
-  geom_point(aes(y = ppt_smooth_pred + resids), size = 0.1, colour = "grey20", alpha = 0.5) +
-  geom_line(aes(y = ppt_smooth_pred), colour = "darkgreen") +
-  geom_hline(yintercept = 0) +
-  scale_y_continuous(breaks = seq(-2000, 8000, 2000), limits = c(-2000, 8000)) +
-  theme_classic() +
-  labs(x = "Annual precipitation (mm)",
-       y = "Partial residuals (GPP, g C m-2, y-1")
-
-# Fitted vs residuals
-ggplot(df_smooths_1, aes(x = fitted, y = GPP)) +
-  geom_point(size = 0.1, colour = "grey30") +
-  geom_abline(slope = 1, intercept = 0, colour = "red", lwd = 1) +
-  theme_classic() +
-  labs(x = "Predicted GPP (g C m-2, yr-1)",
-       y = "Actual GPP (g C m-2, yr-1)")
-
-summary(all_gam1)
-gam.check(all_gam1)
-
-```
-
-Try again allowing loss function to vary with ppt
-
-```{r gam_variable_loss}
-
-# All variables, no variable error rate
-
-bins <- unique(sample_points_binned$woody_bin) %>% sort()
-
-models <- tibble(bins = bins, model = NA)
-
+### Parallelised version with furrr package (future_map)
+# Function to fit GAM to each interval
 fit_gam <- function(bin, data, quantile) {
 
   # Filter data frame to rows within target bin
   data_filtered <- filter(data, woody_bin == bin)
-  
+
+  cat("Fitting GAM to bin: ", bin, "\n")
+
   # Fit quantile regression model
   model <- qgam(
       list(
-        GPP ~ s(precipitation, bs = "ts", k = 16) +
+        GPP ~ s(mean_ppt, bs = "ts", k = 12) +
+          s(ppt_anomaly, bs = "ts", k = 12) +
+          ti(mean_ppt, ppt_anomaly, bs = "ts", k = c(12,12)) +
           s(tMean, bs = "ts", k = 12) +
           s(parMean, bs = "ts", k = 12) +
           s(sand, bs = "ts", k = 12) +
-          s(log(slope + 0.01), bs = "ts", k = 12) +
-          as.factor(landform) +
-          s(twi, bs = "ts", k = 12) +
-          s(year, bs = "ts", k = 8) +
+          # s(log(slope + 0.01), bs = "ts", k = 12) +
+          # as.factor(landform) +
+          # s(twi, bs = "ts", k = 12) +
+          s(year, bs = "ts", k = 6) +
           te(x, y, bs = "cs", k = c(12, 12)),
-        ~ s(precipitation, bs = "ts", k = 16) + s(tMean, bs = "ts", k = 12)
+        ~ s(mean_ppt, bs = "ts", k = 12)
       ),
       data = data_filtered,
-      qu = quantile,
-      multicore = TRUE,
-      ncores = 3
+      qu = quantile
   )
-  
+
+  cat("Bin ", bin, " fitting complete")
+  # beep(5)
+
   # Return model object
   model
 }
 
-models_fitted <- models %>%
-  mutate(model = map(bins, fit_gam, data = sample_points_binned, quantile = 0.9))
+# Map model fitting function over intervals using parallel computing
+# RUNNING TIME ~ 4.5 hours
 
-write_rds(models_fitted,
-         here("data", "processed", "rds", "binned_gam.rds"))
+# tic()
+# models_fitted <- models %>%
+#   mutate(model = future_map(bins, fit_gam, data = sample_points_binned, quantile = 0.9,
+#                             .options = furrr_options(seed = TRUE)))
+# toc()
+# beep(3)
+# 
+# # Write fitted models as R object
+# write_rds(models_fitted,
+#          here("data", "processed", "rds", "binned_gam_anomaly.rds"))
 
-for (i in 1:5) {
-  plot(models_fitted$model[[i]], 
-       pages = 1, 
-       seWithMean = T, 
-       shift = coef(models_fitted$model[[i]])[1], 
-       scheme = 2,
-       ylim = c(0,6000))
+# Load models
+models_fitted <- read_rds(here("data", "processed", "rds", "binned_gam_anomaly.rds")) 
+models_fitted_orig <- read_rds(here("data", "processed", "rds", "binned_gam.rds")) 
+
+```
+
+Visualise GAM results and variable partial effects
+
+```{r gam_viz}
+
+# Display some summary measures
+
+models_df <- models_fitted %>%
+  mutate(glance = map(model, broom::glance)) %>%
+  unnest(glance)
+
+# # Plot partial effects
+# for (i in seq_len(nrow(models_df))) {
+#   plot(models_df$model[[i]], 
+#        pages = 1, 
+#        seWithMean = T, 
+#        shift = coef(models_df$model[[i]])[1], 
+#        scheme = 2,
+#        rug = T,
+#        ylim = c(0,6000))
+#   
+# }
+# 
+# # Appraisal plots
+# for (i in seq_len(length(models_fitted))) {
+#   gam.check(models_fitted[[i]], pages = 1)
+# }
+
+
+# Partial residual plot function
+
+get_partial_residuals <- function(bin, model, df, smooth_name) {
+  
+  filtered_df <- filter(df, woody_bin == bin)
+  smooth_id <- paste0("s(", smooth_name, ")")
+  
+  smooths <- get_smooth(model, smooth_id) %>%
+    eval_smooth(model, data = filtered_df) %>%
+    select(data) %>%
+    unnest(data) %>%
+    mutate(smooth_pred = est + coef(model)[1],
+           lower = smooth_pred - 1.96 * se,
+           upper = smooth_pred + 1.96 * se)
+  
+  df_with_smooths <- filtered_df %>%
+    arrange(precipitation) %>%
+    mutate(fitted = predict(model),
+           resids = residuals(model, type = "response")) %>%
+    select(-all_of(smooth_name)) %>%
+    bind_cols(smooths)
+  
+  df_with_smooths
 }
 
-for(i in models$woody_cover) {
+ # Save plot function
+
+plot_smooth <- function(df, smooth_name) {
   
-  print(i)
-  
-  df <- sample_points_binned %>%
-    filter(woody_bin == i)
-  
-  gam <- qgam(
-    list(
-      GPP ~ s(precipitation, bs = "ts", k = 16) +
-        s(tMean, bs = "ts", k = 12),
-        # s(parMean, bs = "ts", k = 12) +
-        # s(sand, bs = "ts", k = 12) +
-        # s(log(slope + 0.01), bs = "ts", k = 12) +
-        # as.factor(landform) +
-        # s(twi, bs = "ts", k = 12)
-        # s(year, bs = "ts", k = 8) +
-        # te(x, y, bs = "cs", k = c(12, 12)),
-      ~ s(precipitation, bs = "ts", k = 16) + s(tMean, bs = "ts", k = 12)
-    ),
-    qu = 0.9,
-    data = df,
-    multicore = TRUE,
-    ncores = 3
+  smooth_plot <- ggplot(df, aes(x = .data[[smooth_name]], colour = bin)) +
+    geom_ribbon(aes(ymin = lower, ymax = upper, fill = bin, colour = NULL), alpha = 0.1) +
+    # geom_point(aes(y = smooth_pred + resids), colour = "grey20", size = 0.1, alpha = 0.2) +
+    geom_line(aes(y = smooth_pred, colour = bin), alpha = 0.7) +
+    geom_hline(yintercept = 0) +
+    scale_y_continuous(breaks = seq(0, 6000, 1000), limits = c(0, 6000)) +
+    theme_classic() +
+    labs(x = smooth_name,
+         y = "Partial residuals (GPP, g C m-2, y-1")
+
+  filename <- paste0("gam_", smooth_name, "_smooth_anomaly.png")
+
+  ggsave(here("results", "figures", filename),
+         smooth_plot,
+         width = 12, height = 9, units = "cm")
+}
+
+# Apply to each 1d smooth variable
+# (Not currently working for "log(slope + 0.01)")
+
+var_list <- c(
+  "mean_ppt",
+  "ppt_anomaly",
+  "tMean",
+  "parMean",
+  "sand",
+  # "twi",
+  # "log(slope + 0.01)",
+  "year"
   )
+
+for (i in var_list) {
   
-  models$model[models$woody_cover == i] <- gam
+  cat("Processing variable:", i, "\n")
+  
+  partial_smooth_df <- models_fitted %>%
+    mutate(df_with_smooths = map2(bin, model, get_partial_residuals,
+                                  df = sample_points_binned,
+                                  smooth_name = i)) %>%
+    unnest(df_with_smooths) %>%
+    select(-model)
+  
+  cat("Processing complete\n")
+  
+  plot_smooth(partial_smooth_df, smooth_name = i)
+  
+  cat("Saved to file\n")
   
 }
-
-all_gam2 <- qgam(list(GPP ~ s(precipitation, bs = "ts", k = 16) +
-                        s(tMean, bs = "ts", k = 12) +
-                        s(parMean, bs = "ts", k = 12) +
-                        s(sand, bs = "ts", k = 12) +
-                        s(log(slope + 0.01), bs = "ts", k = 12) +
-                        as.factor(landform) +
-                        s(twi, bs = "ts", k = 12)
-                        s(year, bs = "ts", k = 8) +
-                        te(x, y, bs = "cs", k = c(12, 12)),
-                      ~ s(precipitation, bs = "ts", k = 16) + s(tMean, bs = "ts", k = 12)),
-                 qu = 0.9,
-                 data = sample_points_binned
-)
-
-# Visualisation
-
-# Partial effect plots
-plot(all_gam2,
-     seWithMean = T, shift = coef(all_gam2)[1],
-     rug = T,
-     pages = 1,
-     shade = T, shade.col = "lightgreen",
-     scheme = 3)
-
-
-# Partial residual plot
-ppt_smooth_2 <- get_smooth(all_gam2, "s(precipitation)") %>%
-  eval_smooth(all_gam2, data = sample_points_binned) %>%
-  select(data) %>%
-  unnest(data) %>%
-  mutate(ppt_smooth_pred = est + coef(all_gam2)[1],
-         lower = ppt_smooth_pred - 1.96 * se,
-         upper = ppt_smooth_pred + 1.96 * se)
-
-df_smooths_2 <- sample_points_binned %>%
-  arrange(precipitation) %>%
-  mutate(fitted = predict(all_gam2),
-         resids = residuals(all_gam2, type = "response")) %>%
-  select(-precipitation) %>%
-  bind_cols(ppt_smooth_2)
-
-ggplot(df_smooths_2, aes(x = precipitation)) +
-  geom_ribbon(aes(ymin = lower, ymax = upper), fill = "lightgreen") +
-  geom_point(aes(y = ppt_smooth_pred + resids), size = 0.1, colour = "grey20", alpha = 0.5) +
-  geom_line(aes(y = ppt_smooth_pred), colour = "darkgreen") +
-  geom_hline(yintercept = 0) +
-  scale_y_continuous(breaks = seq(-2000, 8000, 2000), limits = c(-2000, 8000)) +
-  theme_classic() +
-  labs(x = "Annual precipitation (mm)",
-       y = "Partial residuals (GPP, g C m-2, y-1")
 
 # Fitted vs residuals
-ggplot(df_smooths_2, aes(x = fitted, y = GPP)) +
-  geom_point(size = 0.1, colour = "grey30") +
+
+
+df_with_partial_residuals <- sample_points_binned %>%
+  group_by(woody_bin) %>%
+  nest() %>%
+  left_join(models_fitted, by = c("woody_bin" = "bin")) %>%
+  mutate(fitted = map(model, predict.gam),
+         residuals = map(model, residuals.gam, type = "response")) %>%
+  unnest(c(data, fitted, residuals))
+
+ggplot(df_with_partial_residuals, aes(x = fitted, y = GPP)) +
+  geom_point(size = 0.1, colour = "grey50", alpha = 0.2) +
+  geom_abline(slope = c(0.2, 0.4, 0.6, 0.8), lwd = 0.5, colour = "grey30") +
   geom_abline(slope = 1, intercept = 0, colour = "red", lwd = 1) +
+  geom_hline(yintercept = 0, lwd = 1) +
   theme_classic() +
   scale_y_continuous(breaks = seq(-2000, 8000, 2000), limits = c(-2000, 8000)) +
   labs(x = "Predicted GPP (g C m-2, yr-1)",
        y = "Actual GPP (g C m-2, yr-1)")
 
-summary(all_gam2)
-gam.check(all_gam2)
-qgam::cqcheck(all_gam2, v = "precipitation")
-
-# # Reduced variables but with interactions
-# 
-# interaction_gam <- qgam(list(GPP ~ s(precipitation, bs = "ts", k = 16) +
-#                                s(tMean, bs = "ts", k = 12) +
-#                                ti(precipitation, tMean, bs = "ts", k = c(12,12)) +
-#                         as.factor(landform) +
-#                         s(year, bs = "ts", k = 8) +
-#                         te(x, y, bs = "cs", k = c(12, 12)),
-#                       ~ s(precipitation, bs = "ts", k = 16) + s(tMean, bs = "ts", k = 12)),
-#                  qu = 0.9,
-#                  data = sample_points_binned
-# )
-# 
-# ppt_smooth_3 <- get_smooth(interaction_gam, "s(precipitation)") %>%
-#   eval_smooth(interaction_gam, data = sample_points_binned) %>%
-#   select(data) %>%
-#   unnest(data) %>%
-#   mutate(ppt_smooth_pred = est + coef(interaction_gam)[1],
-#          lower = ppt_smooth_pred - 1.96 * se,
-#          upper = ppt_smooth_pred + 1.96 * se)
-# 
-# df_smooths_3 <- sample_points_binned %>%
-#   arrange(precipitation) %>%
-#   mutate(fitted = predict(interaction_gam),
-#          resids = residuals(interaction_gam, type = "response")) %>%
-#   select(-precipitation) %>%
-#   bind_cols(ppt_smooth_3)
-# 
-# ggplot(df_smooths_3, aes(x = precipitation)) +
-#   geom_ribbon(aes(ymin = lower, ymax = upper), fill = "lightgreen") +
-#   geom_point(aes(y = ppt_smooth_pred + resids), size = 0.1, colour = "grey20", alpha = 0.5) +
-#   geom_line(aes(y = ppt_smooth_pred), colour = "darkgreen") +
-#   geom_hline(yintercept = 0) +
-#   scale_y_continuous(breaks = seq(-2000, 8000, 2000), limits = c(-2000, 8000)) +
-#   theme_classic() +
-#   labs(x = "Annual precipitation (mm)",
-#        y = "Partial residuals (GPP, g C m-2, y-1")
+summary(models_fitted$model[[1]])
+summary(models_fitted_orig$model[[1]])
+gam.check(models_fitted$model[[1]])
+qgam::cqcheck(models_fitted$model[[1]], v = c("mean_ppt", "ppt_anomaly"))
 
 ```
 
-First attempt at calculating relative productivity index
+Calculate relative productivity index from GAM results:
 
 ```{r rpi}
 
-sample_points_rpi <- df_smooths_2 %>%
+# Add fitted values to sample table
+
+sample_points_fitted <- sample_points_binned %>%
+  group_by(woody_bin) %>%
+  nest() %>%
+  left_join(models_fitted, by = c("woody_bin" = "bin")) %>%
+  mutate(fitted = map2(model, data, predict.gam)) %>%
+  mutate(data = map2(data, fitted, cbind)) %>%
+  select(-fitted, -model) %>%
+  unnest(data) %>%
+  ungroup() %>%
+  rename("fitted" = ".y[[i]]")
+
+# Calculate RPI
+sample_points_rpi <- sample_points_fitted %>%
+  select(id, year, x, y, precipitation, GPP, mean_ppt, ppt_anomaly, fitted, woody_bin) %>%
   mutate(rpi = GPP / fitted)
 
-year_rpi <- sample_points_rpi %>%
+# Visualise RPI patterns
+
+sample_points_rpi %>%
+  ggplot(aes(x = as.factor(year), y = rpi, fill = woody_bin)) +
+  geom_boxplot(outlier.size = 0.2) +
+  geom_hline(yintercept = c(0,1)) +
+  ylim(0, 3) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 40)) +
+  labs(x = "Year", y = "RPI", fill = "Woody cover\nfraction")
+
+sample_points_rpi %>%
+  ggplot(aes(x = as.factor(year), y = precipitation)) +
+  geom_boxplot(outlier.size = 0.2) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 40)) +
+  labs(x = "Year", y = "Precipitation (mm)")
+
+sample_points_rpi %>%
+  ggplot(aes(x = as.factor(year), y = rpi)) +
+  geom_jitter(size = 0.1, alpha = 0.25) +
+  geom_hline(yintercept = c(0,1)) +
+  ylim(0, 3) +
+  theme_bw()
+
+sample_points_rpi %>%
   group_by(year) %>%
-  summarise(mean_rpi = mean(rpi),
-            mean_ppt = mean(precipitation))
+  mutate(map = mean(precipitation)) %>%
+  ungroup() %>%
+  mutate(mean_map = mean(map),
+         map_norm = map / mean_map) %>%
+  ggplot() +
+  geom_col(aes(x = as.factor(year), y = map_norm), position = "identity", fill = "lightblue") +
+  geom_boxplot(aes(x = as.factor(year), y = rpi, fill = woody_bin),
+               outlier.size = 0.1, outlier.alpha = 0.4, colour = "grey50") +
+  geom_hline(yintercept = 1) +
+  ylim(0, 3) +
+  theme_bw()+
+  labs(x = "Year", y = "RPI", fill = "Woody cover\nfraction")
 
-ggplot(sample_points_rpi, aes(x = year, group = year, y = rpi)) +
-  geom_boxplot() +
+sample_points_rpi %>%
+  group_by(year) %>%
+  summarise(map = mean(precipitation),
+            median_rpi = median(rpi)) %>%
+  ggplot() +
+  geom_col(aes(x = year, y = map / mean(map)), fill = "blue", alpha = 0.3) +
+  geom_point(aes(x = year, y = median_rpi), size = 2, colour = "brown") +
+  geom_hline(yintercept = 1) +
+  ylim(0, 2) +
+  labs(x = "", y = "Median RPI vs scaled precipitation)") +
   theme_bw()
 
-ggplot(year_rpi, aes(x = year, y = mean_ppt)) +
-  geom_point(colour = "blue") +
-  theme_bw()
+# Test correlations between rpi and precipitation (should be minimal correlation)
+# Mean/median values per year
+cor_test <- sample_points_rpi %>%
+  group_by(year) %>%
+  summarise(med_rpi = median(rpi),
+            mean_rpi = mean(rpi),
+            map = mean(precipitation)) %>%
+  mutate(lag_map = lag(map))
 
+cor(cor_test[2:19,])
+
+sample_points_rpi %>%
+  group_by(year) %>%
+  summarise(map = mean(precipitation),
+            median_rpi = median(rpi)) %>%
+  ggplot(aes(x = map, y = median_rpi)) +
+  geom_smooth(method = "lm", colour = "brown", fill = "pink", alpha = 0.5) +
+  geom_point(colour = "brown", size = 2) +
+  theme_classic() +
+  labs(x = "Annual precipitation\n(mean across sample points) (mm)",
+       y = "Median RPI")
+
+# Individual points
 ggplot(sample_points_rpi, aes(x = precipitation, y = rpi)) +
-  geom_point(size = 0.5, alpha = 0.5) +
+  geom_point(size = 0.1, alpha = 0.1) +
+  geom_smooth(method = "lm", lwd = 0.4, colour = "red") +
+  labs(x = "Annual precipitation (mm)",
+       y = "RPI") +
   theme_bw()
 
 cor(sample_points_rpi$precipitation, sample_points_rpi$rpi)
+plot(sample_points_rpi$precipitation, sample_points_rpi$rpi, cex = 0.05)
 
-mod <- lm(rpi ~ precipitation, data = sample_points_rpi)
-summary(mod)
+
+```
+Observations:
+
+1. There is very little residual correlation between precipitation and RPI,
+both at an individual point level and aggregated by year. This is a good sign
+that the model is accounting for that relationship.
+2. Most variables have relatively little predictive power. Only rainfall, mean
+annual temperature and to a lesser degree PAR and sand have some apparent
+relationship.
+3. There are relatively small differences between the different woody cover
+bins. The 0-20% bin (mostly grass) has a slightly steeper rainfall-GPP
+relationship, but otherwise the curves are hard to distinguish. The distribution
+of RPI values is also relatively similar between woody cover groups. 
+4. There remains a large-scale year-on-year variation that seems to apply over
+large parts of the area. This is clearly not driven by rainfall or temperature.
+
+Possible causes include:
+- Legacy effects of drought/wet years
+- Differences in temporal pattern of rainfall within each year
+- Some other large-scale ecological phenomenon
+- A poorly fitting model, such that the large-scale model doesn't translate well
+between different sub-regions.
+
+
+
+Show RPI values for inside/outside protected areas
+
+```{r rpi_pas}
+
+rpi_pas <- sample_points_rpi %>%
+  st_as_sf(coords = c("x", "y"), crs = 4326) %>%
+  st_join(protected_areas)
+
+# Plot RPI values for top ten most common PA types
+
+top_groups <- rpi_pas %>%
+  st_drop_geometry() %>%
+  count(DESIG_ENG) %>%
+  arrange(desc(n)) %>%
+  slice_head(n = 10)
+
+target_types <- c("National Park", "National Reserve", "Game Reserve",
+                  "Conservation Area", "Private Ranch", "Private Nature Reserve",
+                    "Community Conservancy")
+
+rpi_pas %>%
+  filter(DESIG_ENG %in% target_types | is.na(DESIG_ENG)) %>%
+  ggplot(aes(x = as.factor(DESIG_ENG), y = rpi)) +
+  geom_boxplot(outlier.size = 0.5) +
+  geom_hline(yintercept = 1) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 0.5)) +
+  labs(x = "Protected area type", y = "RPI") +
+  ylim(0, 1.5)
+
+test <- rpi_pas %>%
+  group_by(DESIG_ENG) %>%
+  nest() %>%
+  mutate(n = map(data, nrow)) %>%
+  arrange(n) %>%
+  slice_head(n = 10) %>%
+  unnest(data)
+
+count(rpi_pas, DESIG_ENG)
+  
+
+```
+This is not very encouraging. Game reserves and national parks have marginally
+higher RPI values than other land tenures, but most don't have much difference
+to areas with no special designation. I need to explore this further.
+
+Test autocorrelation or legacy effects.
+
+```{r legacy_effects}
+
+# Test correlation between previous year's GPP/ppt and current GPP/RPI
+
+sample_points_legacy <- sample_points_rpi %>%
+  group_by(id) %>%
+  arrange(year, .by_group = TRUE) %>%
+  mutate(lag_precipitation = lag(precipitation),
+         lag_anomaly = lag(ppt_anomaly),
+         lag_GPP = lag(GPP)) %>%
+  filter(!is.na(lag_precipitation)) %>%
+  summarise(x = first(x),
+            y = first(y),
+            woody_bin = first(woody_bin),
+            mean_ppt = first(mean_ppt),
+            gpp_rpi_cor = cor(lag_GPP, rpi),
+            ppt_rpi_cor = cor(lag_precipitation, rpi),
+            gpp_gpp_cor = cor(lag_GPP, GPP),
+            ppt_gpp_cor = cor(lag_precipitation, GPP))
+
+sample_points_legacy %>%
+  ggplot(aes(x = woody_bin, y = gpp_rpi_cor)) +
+  geom_boxplot()
+
+tm_shape(ke_tz) + tm_borders() +
+  tm_shape(sample_points_legacy %>% st_as_sf(coords = c("x", "y"), crs = 4326)) +
+  tm_dots(col = "gpp_rpi_cor", palette = "PRGn", style = "cont")
+
+ggplot(sample_points_legacy, aes(x = mean_ppt, y = gpp_rpi_cor)) +
+  geom_point(size = 0.2, alpha = 0.2) +
+  theme_classic()
+
+```
+
+Very strange! There is no consistent correlation between GPP or PPT in the
+previous year and RPI in the current year. There is a consistent negative
+correlation between GPP/PPT in the previous year and GPP in the current year,
+but that could represent regression to the mean.
+
+However, there seem to be strong spatial patterns, with some areas showing
+relatively strong positive correlations and some areas strong negative ones.
+This might just be a spatial fluke, an artifact of a random distribution of
+correlation scores in a spatially clustered way. But it seems worth exploring
+further.
+
+
+Test RESTREND in R environment
+
+```{r restrend}
+
+restrend_df <- sample_points_woody %>%
+  select(id, precipitation, tMean, GPP, year, woody)
+
+set.seed(123)
+subset <- sample(unique(restrend_df$id), 9)
+
+restrend <- restrend_df %>%
+  group_by(id) %>%
+  nest() %>%
+  mutate(
+    model = map(data, function(df) {
+      lm(GPP ~ log(precipitation) + tMean,
+         data = df)
+    })) %>%
+  mutate(summaries = map(model, broom::glance)) %>%
+  unnest(summaries)
+
+
+restrend_df %>%
+  filter(id %in% subset) %>%
+  ggplot(aes(x = precipitation, y = GPP)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  facet_wrap(~id, nrow = 3)
+
+restrend %>%
+  filter(id %in% subset) %>%
+  select(id, adj.r.squared)
+
 
 ```
 
