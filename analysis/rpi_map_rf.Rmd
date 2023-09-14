@@ -1,0 +1,150 @@
+---
+title: "Mapping relative productivity index (RPI)"
+output: html_notebook
+author: Guy Lomax
+date: 2023-08-18
+---
+
+This Notebook uses quantile regression models fitted on sample data to map
+the annual relative productivity index across Kenyan and Tanzanian rangelands
+from 2000 to 2018.
+
+TO DO:
+1. Fix input layers to filter only to rangeland pixels
+2. Include % woody layer to allow fitting of correct model
+
+
+```{r setup, include = FALSE}
+
+# Data handling
+library(tidyverse)
+library(sf)
+library(terra)
+library(here)
+
+# Analysis
+library(mlr3verse)
+library(furrr)
+library(tictoc)
+library(beepr)
+
+# Visualisation
+library(tmap)
+
+tmap_options(check.and.fix = TRUE)
+
+# Set up parallel computing
+nc <- parallel::detectCores() - 2
+
+
+```
+
+
+```{r load, include = FALSE}
+
+# Country boundaries
+countries <- st_read(here("data", "raw", "vector", "natural_earth",
+                          "ne_110m_admin_0_countries_fixed.shp"))
+
+ke_tz <- countries %>% filter(NAME %in% c("Kenya", "Tanzania"))
+
+# Covariate layers
+# Static
+static_covariates <- rast(here("data", "raw", "raster", "covariateMaps",
+                                 "staticVars.tif"))
+
+twi <- rast(here("data", "processed", "raster", "hydroSHEDS",
+                 "hydrosheds_twi_fd8.tif")) 
+
+names(twi) <- "twi"
+
+# Load dynamic covariates as a named list of rasters (one per year)
+dynamic_covariates_paths <- Sys.glob(here("data", "raw", "raster", "covariateMaps",
+                                          "dynamicVars*.tif"))
+
+years <- str_extract(dynamic_covariates_paths, "\\d\\d\\d\\d")
+dynamic_covariates <- map(dynamic_covariates_paths, rast)
+names(dynamic_covariates) <- years
+
+# Fitted models
+
+rf_tuned_spt <- read_rds(here("results", "rds", "rf_tuned_spt.rds"))
+
+```
+
+Prepare data for prediction
+
+```{r data_prep}
+
+# Reproject TWI to same resolution and CRS as other layers
+
+twi_reproj <- project(twi, static_covariates)
+
+# Crop twi and static covariates to dynamic covariates layers
+# (GEE doesn't match extents properly due to resampling)
+
+twi_crop <- crop(twi_reproj, dynamic_covariates[[1]])
+static_crop <- crop(static_covariates, dynamic_covariates[[1]])
+
+# Calculate mean ppt raster
+
+mean_ppt_rast <- dynamic_covariates %>%
+  map(subset, subset = "precipitation") %>%
+  rast() %>%
+  mean()
+
+# For each year, create a data frame for prediction
+
+prepare_covariates <- function(dynamic_rast, year) {
+  
+  # Progress message
+  message(paste0("Processing year ", year))
+  
+  # Extract and join rasters
+  all_covariates <- c(dynamic_rast, static_crop, twi_crop)
+  
+  # Rename PAR layer
+  names(all_covariates)[names(all_covariates) == "GMT_0900_PAR"] <- "par"
+  
+  # Add mean ppt and ppt anomaly
+  ppt_anomaly <- all_covariates[["precipitation"]] / mean_ppt_rast
+  
+  all_covariates_anomaly <- c(all_covariates, mean_ppt_rast, ppt_anomaly)
+  
+  # Mask to Kenya/Tanzania
+  all_covariates_masked <- mask(all_covariates_anomaly, ke_tz)
+  
+  all_covariates_masked
+}
+
+covariate_list <- map2(dynamic_covariates, names(dynamic_covariates), prepare_covariates)
+
+# write_rds(covariate_list,
+#           here("data", "processed", "rds", "covariate_rasters.rds"))
+
+```
+
+
+```{r fitted_values}
+
+# covariate_dfs <- read_rds(here("data", "processed", "rds", "covariate_dfs.rds"))
+
+# Prepare variables for fitting
+
+covariate_list[[1]]
+names(covariate_list[[1]])
+
+# Predict model to each year's raster and write to disk
+
+predict_rpi_raster <- function(raster, model) {
+  ?ranger::predict.ranger
+}
+
+
+```
+Apply to full study area to map annual RPI
+
+```{r rpi_map}
+
+```
+

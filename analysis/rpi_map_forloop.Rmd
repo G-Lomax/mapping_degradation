@@ -36,8 +36,8 @@ library(tmap)
 tmap_options(check.and.fix = TRUE)
 
 # Set up parallel computing
-nc <- detectCores() - 1
-plan(multisession, workers = nc)
+nc <- detectCores() - 2
+
 
 
 ```
@@ -59,6 +59,8 @@ static_covariates <- rast(here("data", "raw", "raster", "covariateMaps",
 twi <- rast(here("data", "processed", "raster", "hydroSHEDS",
                  "hydrosheds_twi_fd8.tif"))
 
+names(twi) <- "twi"
+
 # Load dynamic covariates as a named list of rasters (one per year)
 dynamic_covariates_paths <- Sys.glob(here("data", "raw", "raster", "covariateMaps",
                                           "dynamicVars*.tif"))
@@ -69,7 +71,7 @@ names(dynamic_covariates) <- years
 
 # Fitted models
 
-models <- read_rds(here("data", "processed", "rds", "binned_gam.rds"))
+models <- read_rds(here("data", "processed", "rds", "binned_gam_anomaly_timing.rds"))
 
 ```
 
@@ -88,6 +90,8 @@ twi_crop <- crop(twi_reproj, dynamic_covariates[[1]])
 static_crop <- crop(static_covariates, dynamic_covariates[[1]])
 
 ```
+
+
 Prepare functions for data preparation, model fitting and prediction to raster
 
 ```{r functions}
@@ -98,6 +102,8 @@ raster_to_df <- function(dynamic_rast, year) {
   
   # Progress message
   message(paste0("Processing year ", year))
+  
+  names(dynamic_rast)[names(dynamic_rast) == "GMT_0900_PAR"] <- "parMean"
   
   # Extract and join rasters
   all_covariates <- c(dynamic_rast, static_crop, twi_crop)
@@ -119,13 +125,17 @@ raster_to_df <- function(dynamic_rast, year) {
 clean_df <- function(df) {
   df_clean <- df %>%
     filter(!is.na(GPP)) %>%
-    rename(twi = hydrosheds_twi_fd8,
-           parMean = GMT_0900_PAR) %>%
     mutate(woody = shrubland + trees,
            woody_bin = cut_interval(woody, 5))
   
   df_clean
 }
+
+# Add derived variables: ppt_mean, ppt_anomaly and meanPptDay_anom
+
+# add_derived_variables <- function(df) {
+#   df_
+# }
 
 # Group rows by woody cover and attach prediction model
 
@@ -179,6 +189,9 @@ df_to_raster <- function(df, target) {
 ```
 
 
+Loop through annual raster layers to create maps of predicted potential GPP and
+RPI. A loop is needed to avoid hitting memory limits with large raster sizes.
+
 ```{r calc_rpi}
 
 for (i in seq_len(length(dynamic_covariates))) {
@@ -216,7 +229,7 @@ for (i in seq_len(length(dynamic_covariates))) {
   message("Conversion to raster complete")
   
   # Write to raster file
-  filename <- paste0("rpi_rast_", year, ".tif")
+  filename <- paste0("rpi_rast_with_timing_", year, ".tif")
   writeRaster(rpi_rast,
               here("data", "processed", "raster", "rpi", filename),
               overwrite = TRUE)

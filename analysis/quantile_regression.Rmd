@@ -32,8 +32,7 @@ library(gratia)
 library(mgcViz)
 
 # Set up parallel computing
-nc <- detectCores() - 1
-plan(multisession, workers = nc)
+nc <- 5
 
 tmap_options(check.and.fix = TRUE)
 
@@ -191,9 +190,11 @@ fit_gam <- function(bin, data, quantile) {
   model
 }
 
-# Map model fitting function over intervals using parallel computing
-# RUNNING TIME ~ 4.5 hours
-
+# # Map model fitting function over intervals using parallel computing
+# # RUNNING TIME ~ 4.5 hours
+#
+# plan(multisession, workers = nc)
+# 
 # tic()
 # models_fitted <- models %>%
 #   mutate(model = future_map(bins, fit_gam, data = sample_points_binned, quantile = 0.9,
@@ -207,13 +208,13 @@ fit_gam <- function(bin, data, quantile) {
 
 # Load models
 models_fitted <- read_rds(here("data", "processed", "rds", "binned_gam_anomaly.rds")) 
-models_fitted_orig <- read_rds(here("data", "processed", "rds", "binned_gam.rds")) 
+
 
 ```
 
 Visualise GAM results and variable partial effects
 
-```{r gam_viz}
+```{r gam_viz, eval = FALSE}
 
 # Display some summary measures
 
@@ -294,7 +295,7 @@ var_list <- c(
   "tMean",
   "parMean",
   "sand",
-  # "twi",
+  "twi",
   # "log(slope + 0.01)",
   "year"
   )
@@ -365,8 +366,14 @@ sample_points_fitted <- sample_points_binned %>%
 
 # Calculate RPI
 sample_points_rpi <- sample_points_fitted %>%
-  select(id, year, x, y, precipitation, GPP, mean_ppt, ppt_anomaly, fitted, woody_bin) %>%
+  select(id, year, x, y, precipitation, GPP, mean_ppt, ppt_anomaly, sand, tMean, fitted, woody_bin) %>%
   mutate(rpi = GPP / fitted)
+
+```
+
+
+
+```{r rpi_viz, eval = FALSE}
 
 # Visualise RPI patterns
 
@@ -385,13 +392,6 @@ sample_points_rpi %>%
   theme_bw() +
   theme(axis.text.x = element_text(angle = 40)) +
   labs(x = "Year", y = "Precipitation (mm)")
-
-sample_points_rpi %>%
-  ggplot(aes(x = as.factor(year), y = rpi)) +
-  geom_jitter(size = 0.1, alpha = 0.25) +
-  geom_hline(yintercept = c(0,1)) +
-  ylim(0, 3) +
-  theme_bw()
 
 sample_points_rpi %>%
   group_by(year) %>%
@@ -451,10 +451,10 @@ ggplot(sample_points_rpi, aes(x = precipitation, y = rpi)) +
   theme_bw()
 
 cor(sample_points_rpi$precipitation, sample_points_rpi$rpi)
-plot(sample_points_rpi$precipitation, sample_points_rpi$rpi, cex = 0.05)
 
 
 ```
+
 Observations:
 
 1. There is very little residual correlation between precipitation and RPI,
@@ -481,19 +481,13 @@ between different sub-regions.
 
 Show RPI values for inside/outside protected areas
 
-```{r rpi_pas}
+```{r rpi_pas, eval = FALSE}
 
 rpi_pas <- sample_points_rpi %>%
   st_as_sf(coords = c("x", "y"), crs = 4326) %>%
   st_join(protected_areas)
 
 # Plot RPI values for top ten most common PA types
-
-top_groups <- rpi_pas %>%
-  st_drop_geometry() %>%
-  count(DESIG_ENG) %>%
-  arrange(desc(n)) %>%
-  slice_head(n = 10)
 
 target_types <- c("National Park", "National Reserve", "Game Reserve",
                   "Conservation Area", "Private Ranch", "Private Nature Reserve",
@@ -509,25 +503,23 @@ rpi_pas %>%
   labs(x = "Protected area type", y = "RPI") +
   ylim(0, 1.5)
 
-test <- rpi_pas %>%
-  group_by(DESIG_ENG) %>%
-  nest() %>%
-  mutate(n = map(data, nrow)) %>%
-  arrange(n) %>%
-  slice_head(n = 10) %>%
-  unnest(data)
 
-count(rpi_pas, DESIG_ENG)
   
 
 ```
+
 This is not very encouraging. Game reserves and national parks have marginally
 higher RPI values than other land tenures, but most don't have much difference
 to areas with no special designation. I need to explore this further.
 
-Test autocorrelation or legacy effects.
+Hypothesis 1: Variation is caused by legacy effects of above- or below-average
+rainfall years, such that one or more dry years negatively impacts GPP in the
+following year.
 
-```{r legacy_effects}
+To test this, we look for correlations between RPI and previous year's
+precipitation or GPP values.
+
+```{r legacy_effects, eval = FALSE}
 
 # Test correlation between previous year's GPP/ppt and current GPP/RPI
 
@@ -540,23 +532,39 @@ sample_points_legacy <- sample_points_rpi %>%
   filter(!is.na(lag_precipitation)) %>%
   summarise(x = first(x),
             y = first(y),
+            sand = first(sand),
+            tMean = mean(tMean),
             woody_bin = first(woody_bin),
             mean_ppt = first(mean_ppt),
+            ppt_anomaly = first(ppt_anomaly),
             gpp_rpi_cor = cor(lag_GPP, rpi),
             ppt_rpi_cor = cor(lag_precipitation, rpi),
             gpp_gpp_cor = cor(lag_GPP, GPP),
-            ppt_gpp_cor = cor(lag_precipitation, GPP))
+            ppt_gpp_cor = cor(lag_precipitation, GPP),
+            anom_rpi_cor = cor(lag_anomaly, rpi),
+            anom_gpp_cor = cor(lag_anomaly, GPP))
 
 sample_points_legacy %>%
-  ggplot(aes(x = woody_bin, y = gpp_rpi_cor)) +
-  geom_boxplot()
+  ggplot(aes(x = woody_bin, y = ppt_rpi_cor)) +
+  geom_boxplot() +
+  geom_hline(yintercept = 0, colour = "grey") +
+  theme_classic() +
+  ylim(-0.8, 0.8) +
+  labs(title = "Correlations of RPI with previous year's precipitation",
+       x = "Woody fraction bin",
+       y = "Pearson's correlation coefficient")
 
 tm_shape(ke_tz) + tm_borders() +
   tm_shape(sample_points_legacy %>% st_as_sf(coords = c("x", "y"), crs = 4326)) +
-  tm_dots(col = "gpp_rpi_cor", palette = "PRGn", style = "cont")
+  tm_dots(col = "ppt_rpi_cor", palette = "PRGn", style = "cont")
 
-ggplot(sample_points_legacy, aes(x = mean_ppt, y = gpp_rpi_cor)) +
+sample_points_legacy %>%
+  pivot_longer(cols = c("sand", "tMean", "mean_ppt"),
+               names_to = "var", values_to = "value") %>%
+ggplot(aes(x = value, y = ppt_rpi_cor)) +
   geom_point(size = 0.2, alpha = 0.2) +
+  geom_smooth(method = "gam", se = TRUE) +
+  facet_wrap(~var, scales = "free_x") +
   theme_classic()
 
 ```
@@ -569,8 +577,386 @@ but that could represent regression to the mean.
 However, there seem to be strong spatial patterns, with some areas showing
 relatively strong positive correlations and some areas strong negative ones.
 This might just be a spatial fluke, an artifact of a random distribution of
-correlation scores in a spatially clustered way. But it seems worth exploring
-further.
+correlation scores in a spatially clustered way.
+
+Plotting correlation against mean precipitation, soil texture and mean
+temperature reveals weak but interesting patterns. Drier and hotter pixels
+tend to have weak negative correlations between previous-year PPT and RPI, i.e.,
+for these areas (areas with higher water stress?), high previous-year PPT is
+associated with lower GPP this year, and vice versa, all else being equal?
+That's a weird result - it suggests that drier areas have less sensitivity to
+drought legacy effects than wetter areas.
+
+Next test is to compare RPI to SPEI drought indicators for each year
+
+```{r spei_test, eval = FALSE}
+
+spei_points <- read_csv(here("data", "processed", "vector", "spei_sample.csv")) %>%
+  select(-ID, -geometry) %>%
+  pivot_longer(cols = starts_with("Aug"), names_to = "year", values_to = "spei") %>%
+  mutate(year = (substr(year, 5,8) %>% as.numeric) - 1)
+
+rpi_spei <- left_join(sample_points_rpi, spei_points, by = c("id", "year"))
+
+ggplot(rpi_spei, aes(x = spei, y = rpi)) +
+  geom_point(size = 0.1, alpha = 0.1) +
+  theme_classic()
+
+rpi_spei_cor <- rpi_spei %>%
+  group_by(id) %>%
+  mutate(lag_spei = lag(spei)) %>%
+  filter(!is.na(lag_spei)) %>%
+  summarise(spei_rpi_cor = cor(spei, rpi),
+            lag_spei_rpi_cor = cor(lag_spei, rpi),
+            woody_bin = first(woody_bin),
+            precipitation = first(precipitation),
+            mean_ppt = first(mean_ppt),
+            tMean = mean(tMean),
+            x = first(x),
+            y = first(y),
+            sand = first(sand))
+
+ggplot(rpi_spei_cor, aes(x = woody_bin, y = spei_rpi_cor)) +
+  geom_boxplot() +
+  geom_hline(yintercept = 0) +
+  ylim(-0.8, 0.8) +
+  labs(title = "Correlation of RPI with SPEI drought index",
+       y = "Pearson correlation coefficient",
+       x = "Woody fraction bin") +
+  theme_classic()
+
+tm_shape(ke_tz) + tm_borders() +
+  tm_shape(rpi_spei_cor %>% st_as_sf(coords = c("x", "y"), crs = 4326)) +
+  tm_dots(col = "spei_rpi_cor", palette = "PRGn", style = "cont")
+
+rpi_spei_cor %>%
+  pivot_longer(cols = c("mean_ppt", "tMean", "sand"),
+               names_to = "var", values_to = "value") %>%
+  ggplot(aes(x = value, y = lag_spei_rpi_cor)) +
+  geom_point(size = 0.2, alpha = 0.1) +
+  geom_smooth(method = "gam") +
+  facet_wrap(~var, scales = "free_x") +
+  theme_classic()
+
+
+
+```
+
+No strong overall correlations between previous year ppt and RPI or between 12-month
+SPEI and RPI. This makes the simple lag/legacy hypothesis unlikely, or at least
+more complex.
+
+However, we see the same thing with correlations as a function of different
+variables: low mean precipitation and high mean T are associated with more
+negative correlations between SPEI and RPI, both for SPEI that year and for
+the previous year's SPEI.
+
+There is clearly some modest effect here - worth exploring further - but the
+effect is not large or consistent enough to explain the large year-on-year
+variations in RPI seen across the dataset.
+
+Hypothesis 2: Distribution of precipitation within the year is driving it.
+
+```{r precip_dist}
+
+# Precipitation distribution metrics
+
+ppt_distribution <- st_read(here("data", "raw", "vector", "coarse",
+                                 "pptDistributionSample.geojson"))
+
+clean_df <- function(df) {
+
+  df_clean <- df %>%
+    dplyr::select(-c("allRangelands", "grassland", "igbp", "shrubland", "trees", "geometry")) %>%
+    st_drop_geometry() %>%
+    pivot_longer(cols = !id, names_to = "colname", values_to = "value") %>%
+    separate_wider_delim(colname, "_", names = c("variable", "year")) %>%
+    mutate(year = as.numeric(year)) %>%
+    pivot_wider(names_from = "variable", values_from = "value")
+
+  df_clean
+
+}
+
+ppt_distribution_clean <- clean_df(ppt_distribution)
+  
+rpi_ppt_dist <- sample_points_rpi %>%
+  left_join(ppt_distribution_clean, by = c("id", "year"))
+
+```
+
+
+```{r precip_dist_rpi_viz, eval = FALSE}
+
+rpi_ppt_dist %>%
+  pivot_longer(cols = c("sdii", "ugi", "meanPptDay"),
+               names_to = "var", values_to = "value") %>%
+  ggplot(aes(x = as.factor(year), y = value, fill = woody_bin)) +
+  geom_boxplot(outlier.size = 0.1, outlier.alpha = 0.5) +
+  facet_wrap(~var, scales = "free", nrow = 2) +
+  theme_bw()
+
+rpi_ppt_dist %>%
+  pivot_longer(cols = c("sdii", "ugi", "meanPptDay"),
+               names_to = "var", values_to = "value") %>%
+  ggplot(aes(x = value, y = rpi)) +
+  geom_point(size = 0.1, alpha = 0.1) +
+  geom_smooth(method = "gam") +
+  facet_wrap(~var, scales = "free", nrow = 2) +
+  theme_bw() +
+  ylim(0,2)
+
+rpi_ppt_dist %>%
+  group_by(year, woody_bin) %>%
+  summarise(rpi = mean(rpi),
+            ppt_anomaly = mean(ppt_anomaly),
+            sdii = mean(sdii),
+            ugi = mean(ugi),
+            meanPptDay = mean(meanPptDay)) %>%
+  pivot_longer(cols = -c(year, rpi, woody_bin), names_to = "var", values_to = "value") %>%
+  ggplot(aes(x = value, y = rpi, colour = woody_bin)) +
+  geom_point() +
+  facet_wrap(~var, scales = "free_x", nrow = 2) +
+  ylim(0, 2) +
+  geom_hline(yintercept = 1) +
+  theme_bw()+
+  labs(title = "RPI vs precipitation distribution metrics")
+  
+# Test with normalised values (i.e., relative to mean for each point)
+
+rpi_ppt_dist_norm <- rpi_ppt_dist %>%
+  group_by(id) %>%
+  mutate(ugi_norm = ugi / mean(ugi),
+         sdii_norm = sdii / mean(sdii),
+         meanPptDay_norm = meanPptDay / mean(meanPptDay)) %>%
+  ungroup()
+
+rpi_ppt_dist_norm %>%
+  pivot_longer(cols = c("sdii_norm", "ugi_norm", "meanPptDay_norm"),
+               names_to = "var", values_to = "value") %>%
+  ggplot(aes(x = value, y = rpi)) +
+  geom_point(size = 0.1, alpha = 0.1) +
+  geom_smooth(method = "gam") +
+  facet_wrap(~var, nrow = 2, scales = "free_x") +
+  theme_bw() +
+  ylim(0, 2) +
+  geom_hline(yintercept = 1) +
+  labs(title = "RPI vs normalised precipitation distribution metrics")
+
+```
+
+Gotcha! I've found a strong and almost linear negative relationship
+between normalised weighted mean date of precipitation and RPI. This would 
+explain a considerable amount of the annual variation, I think.
+
+The next step is to include this variable in the original model. Since it
+is derived from precipitation data, I should include interaction terms with
+both the mean_ppt and the ppt_anomaly.
+
+```{r gam_with_ppt_timing}
+
+# Create dataframe with PPT timing as a variable
+
+sample_points_with_timing <- sample_points_binned %>%
+  left_join(ppt_distribution_clean) %>%
+  group_by(id) %>%
+  mutate(meanPptDay_anom = meanPptDay / mean(meanPptDay)) %>%
+  ungroup()
+
+# Run separate GAM with all variables on each 20% interval
+
+# models_with_timing <- tibble(bin = bins, model = NA)
+# quantile <- 0.9
+# 
+# ### Parallelised version with furrr package (future_map)
+# # Function to fit GAM to each interval
+# fit_gam_timing <- function(bin, data, quantile) {
+# 
+#   # Filter data frame to rows within target bin
+#   data_filtered <- filter(data, woody_bin == bin)
+# 
+#   cat("Fitting GAM to bin: ", bin, "\n")
+# 
+#   # Fit quantile regression model
+#   model <- qgam(
+#       list(
+#         GPP ~ s(mean_ppt, bs = "ts", k = 12) +
+#           s(ppt_anomaly, bs = "ts", k = 12) +
+#           s(meanPptDay_anom, bs = "ts", k = 12) +
+#           ti(mean_ppt, ppt_anomaly, bs = "ts", k = c(8,8)) +
+#           ti(mean_ppt, meanPptDay_anom, bs = "ts", k = c(8, 8)) +
+#           ti(ppt_anomaly, meanPptDay_anom, bs = "ts", k = c(8,8)) +
+#           s(tMean, bs = "ts", k = 12) +
+#           s(parMean, bs = "ts", k = 8) +
+#           s(sand, bs = "ts", k = 8) +
+#           s(log(slope + 0.01), bs = "ts", k = 8) +
+#           s(twi, bs = "ts", k = 8) +
+#           s(year, bs = "ts", k = 12) +
+#           te(x, y, bs = "ts", k = c(12,12)),
+#         ~ s(mean_ppt, bs = "ts", k = 12)
+#       ),
+#       data = data_filtered,
+#       qu = quantile
+#   )
+# 
+#   cat("Bin ", bin, " fitting complete")
+#   # beep(5)
+# 
+#   # Return model object
+#   model
+# }
+# 
+# # Map model fitting function over intervals using parallel computing
+# # RUNNING TIME ~ 4.5 hours
+# 
+# plan(multisession, workers = nc)
+# 
+# tic()
+# models_fitted_with_timing <- models_with_timing %>%
+#   mutate(model = future_map(bins, fit_gam_timing, data = sample_points_with_timing,
+#                             quantile = 0.9,
+#                             .options = furrr_options(seed = TRUE)))
+# toc()
+# beep(3)
+# 
+# # Write fitted models as R object
+# write_rds(models_fitted_with_timing,
+#          here("data", "processed", "rds", "binned_gam_anomaly_timing.rds"))
+
+models_fitted_with_timing <- read_rds(here("data", "processed", "rds",
+                                           "binned_gam_anomaly_timing.rds"))
+
+```
+
+
+```{r rpi_with_ppt_time}
+
+# Add fitted values to sample table
+
+sample_points_fitted_with_timing <- sample_points_with_timing %>%
+  group_by(woody_bin) %>%
+  nest() %>%
+  left_join(models_fitted_with_timing, by = c("woody_bin" = "bin")) %>%
+  mutate(fitted = map2(model, data, predict.gam)) %>%
+  mutate(data = map2(data, fitted, cbind)) %>%
+  select(-fitted, -model) %>%
+  unnest(data) %>%
+  ungroup() %>%
+  rename("fitted" = ".y[[i]]")
+
+# Calculate RPI
+sample_points_rpi_timing <- sample_points_fitted_with_timing %>%
+  select(id, year, x, y, precipitation, GPP, mean_ppt, ppt_anomaly, meanPptDay_anom, sand, tMean, fitted, woody_bin) %>%
+  mutate(rpi = GPP / fitted)
+
+```
+
+```{r rpi_with_ppt_time_viz, eval = FALSE}
+
+# Visualise RPI patterns
+
+# RPI boxplots by woody cover fraction and year
+sample_points_rpi_timing %>%
+  ggplot(aes(x = as.factor(year), y = rpi, fill = woody_bin)) +
+  geom_boxplot(outlier.size = 0.2) +
+  geom_hline(yintercept = c(0,1)) +
+  ylim(0, 3) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 40)) +
+  labs(x = "Year", y = "RPI", fill = "Woody cover\nfraction")
+
+# As above, with mean precipitation indicator
+sample_points_rpi %>%
+  group_by(year) %>%
+  mutate(map = mean(precipitation)) %>%
+  ungroup() %>%
+  mutate(mean_map = mean(map),
+         map_norm = map / mean_map) %>%
+  ggplot() +
+  geom_col(aes(x = as.factor(year), y = map_norm), position = "identity", fill = "lightblue") +
+  geom_boxplot(aes(x = as.factor(year), y = rpi, fill = woody_bin),
+               outlier.size = 0.1, outlier.alpha = 0.4, colour = "grey50") +
+  geom_hline(yintercept = 1) +
+  ylim(0, 3) +
+  theme_bw()+
+  labs(x = "Year", y = "RPI", fill = "Woody cover\nfraction")
+
+# Median rpi each year with precipitation
+sample_points_rpi_timing %>%
+  group_by(year) %>%
+  summarise(map = mean(precipitation),
+            median_rpi = median(rpi)) %>%
+  ggplot() +
+  geom_col(aes(x = year, y = map / mean(map)), fill = "blue", alpha = 0.3) +
+  geom_point(aes(x = year, y = median_rpi), size = 2, colour = "brown") +
+  geom_hline(yintercept = 1) +
+  ylim(0, 2) +
+  labs(x = "", y = "Median RPI vs scaled precipitation)") +
+  theme_bw()
+
+# Test correlations between rpi and precipitation (should be minimal correlation)
+# Mean/median values per year
+cor_test_timing <- sample_points_rpi_timing %>%
+  group_by(year) %>%
+  summarise(med_rpi = median(rpi),
+            mean_rpi = mean(rpi),
+            map = mean(precipitation)) %>%
+  mutate(lag_map = lag(map))
+
+cor(cor_test_timing[2:19,])
+
+# Scatter plot of mean precipitation vs. median RPI for each year
+sample_points_rpi_timing %>%
+  group_by(year) %>%
+  summarise(map = mean(precipitation),
+            median_rpi = median(rpi)) %>%
+  ggplot(aes(x = map, y = median_rpi)) +
+  geom_smooth(method = "lm", colour = "brown", fill = "pink", alpha = 0.5) +
+  geom_point(colour = "brown", size = 2) +
+  theme_classic() +
+  labs(x = "Annual precipitation\n(mean across sample points) (mm)",
+       y = "Median RPI")
+
+# Scatter plot for all points + years
+ggplot(sample_points_rpi_timing, aes(x = precipitation, y = rpi)) +
+  geom_point(size = 0.1, alpha = 0.1) +
+  geom_smooth(method = "lm", lwd = 0.4, colour = "red") +
+  labs(x = "Annual precipitation (mm)",
+       y = "RPI") +
+  theme_bw()
+
+cor(sample_points_rpi_timing$precipitation, sample_points_rpi_timing$rpi)
+
+# Boxplot of ppt vs rpi correlation for each sample point across years
+sample_points_rpi_timing %>%
+  group_by(id) %>%
+  summarise(ppt_rpi_cor = cor(precipitation, rpi),
+            ppt_anom_rpi_cor = cor(ppt_anomaly, rpi),
+            ppt_timing_rpi_cor = cor(meanPptDay_anom, rpi),
+            woody_bin = first(woody_bin)) %>%
+  pivot_longer(cols = ends_with("_cor")) %>%
+  ggplot(aes(x = name, y = value, fill = woody_bin)) +
+  geom_boxplot() +
+  theme_bw()
+
+
+```
+Good progress. It seems the new model does significantly reduce the year-on-year
+variation in RPI, providing a more consistent index with similar distributions
+each year. However, there are remaining issues and questions:
+
+- There is still some variation, e.g., the large increase in 2015 remains
+unexplained.
+- I think there is some complex legacy effect going on whereby large amounts of
+late rainfall in a year allow the following year to be more productive, whereas
+large amounts of rainfall early in a year don't have much effect on subsequent
+years. I am accounting for the harmful effect of late rainfall on the current
+year, but not its beneficial effect on the subsequent year (and vice versa).
+- There seems to be some residual correlation now between mean/median RPI and
+mean total precipitation in a year, but that doesn't replicate at the level of
+individual points.
+- The quantile regression is a little skewiff, in that about 93% of points are
+below the fitted 0.9 quantile. The same was true in the random forest.
 
 
 Test RESTREND in R environment

@@ -27,10 +27,8 @@ library(tictoc)
 library(beepr)
 
 # Visualisation
-library(tmap)
-library(mlr3viz)
-
-tmap_options(check.and.fix = TRUE)
+# library(tmap)
+# library(mlr3viz)
 
 # Parallelisation
 nc <- detectCores() - 2
@@ -51,11 +49,11 @@ sample_points_raw <- st_read(here("data", "raw", "vector", "coarse",
 
 twi <- read_csv(here("data", "processed", "csv", "twi_sample.csv"))
 
-ecoregions <- st_read(here("data", "raw", "vector", "coarse", "Ecoregions2017",
-                                  "Ecoregions2017.shp"))
-
-rangeland_ecoregions <- filter(ecoregions, ECO_ID %in% c(50, 51, 55, 57)) %>%
-  mutate(ECO_NAME = str_replace(ECO_NAME, "Commiphora ", "Commiphora\n"))
+# ecoregions <- st_read(here("data", "raw", "vector", "coarse", "Ecoregions2017",
+#                                   "Ecoregions2017.shp"))
+# 
+# rangeland_ecoregions <- filter(ecoregions, ECO_ID %in% c(50, 51, 55, 57)) %>%
+#   mutate(ECO_NAME = str_replace(ECO_NAME, "Commiphora ", "Commiphora\n"))
 
 
 ```
@@ -95,7 +93,7 @@ sample_points_clean <- sample_points_woody %>%
 
 # Exploratory data analysis
 
-```{r eda, eval = FALSE}
+```{r eda, eval=FALSE, include=FALSE}
 
 # Study area map
 
@@ -132,7 +130,20 @@ sample_points_woody %>%
 
 
 ```
-Data preparation for RF modelling
+# Data preparation for RF modelling
+
+We select variables to use for modelling, remove rows containing NA values
+(the TWI raster has some pixels with NA values) and convert to a spatiotemporal
+regression task. We assign point id ("id") as our index of spatial location and
+"year" as our index of time.
+
+We then choose our learner (random forest regression through the ranger package)
+with quantile regression enabled, and define two alternative resampling (cross-
+validation) strategies: random CV and "Leave-location-and-time-out" CV that
+ensures the validation set for each fold does not overlap in either time or space
+with the training set.
+
+When defining the learner, we initially choose 
 
 ```{r data_prep}
 
@@ -172,135 +183,208 @@ task_gpp$set_col_roles("year", roles = "time")
 
 # Create learner (ranger random forest) with initial tuning values
 
-lrn_ranger <- lrn("regr.ranger", 
-                     predict_type = "response",
-                     quantreg = TRUE,
-                     num.trees = 501,
-                     mtry = 3,
-                     min.node.size = 50,
-                     sample.fraction = 0.6
+lrn_ranger_untuned <- lrn("regr.ranger", 
+                          predict_type = "response",
+                          num.trees = 501,
+                          mtry.ratio = 0.5,
+                          min.node.size = 50,
+                          sample.fraction = 0.6
 )
 
-set_threads(lrn_ranger, nc)
+set_threads(lrn_ranger_untuned, 1)
 
 # Create resampling strategy
 
 spt_cv_plan <- rsmp("sptcv_cstf", folds = 10)
 nspt_cv_plan <- rsmp("cv", folds = 10)
 
-
-
-tuner_random <- tnr("random_search")
-
-at_spt <- auto_tuner(
-  tuner = tuner_random,
-  learner = lrn_ranger_sp,
-  resampling = spt_cv_plan,
-  measure = tune_msr,
-  term_evals = 5
-)
-
-at_nsp <- auto_tuner(
-  tuner = tuner_random,
-  learner = lrn_ranger_nsp,
-  resampling = nspt_cv_plan,
-  measure = tune_msr,
-  term_evals = 5
-)
-
-
 ```
+# Feature selection
 
+We use forward feature selection with the untuned model to identify which
+covariates have unique information to predict GPP. For this, we start by
+building all possible single-variable models. Then, selecting the variable that
+gives the best performance (lowest RMSE in this case), we build all possible
+two-variable models that include this variable. We do the same with a third
+variable, and so on, until the point at which adding an additional variable
+fails to improve model performance.
 
-Forward feature selection with untuned model to identify key features
+We do this separately for models using random CV and spatio-temporal CV, and
+save the optimum feature set for each.
 
-```{r rf_fs}
+```{r rf_feature_select}
 
 # Create forward feature selection with untuned model, minimising rmse
 
-perf_msr <- msr("regr.rmse")
+perf_msr <- msr(c("regr.rmse"))
 
-fs_method <- fs("sequential")
+fs_method <- fs("sequential", min_features = 1)
 
-fs_term <- trm("stagnation", iters = 10)
+fs_term <- trm("stagnation_batch")
 
-spt_feature_select <- auto_fselector(
-  fselector = fs_method,
-  learner = lrn_ranger,
+spt_feature_select <- fsi(
+  task = task_gpp,
+  learner = lrn_ranger_untuned,
   resampling = spt_cv_plan,
-  measure = perf_msr,
+  measures = perf_msr,
   terminator = fs_term
 )
 
-nspt_feature_select <- auto_fselector(
-  fselector = fs_method,
-  learner = lrn_ranger,
+nspt_feature_select <- fsi(
+  task = task_gpp,
+  learner = lrn_ranger_untuned,
   resampling = nspt_cv_plan,
   measure = perf_msr,
   terminator = fs_term
 )
 
-# Model fitting
+# # Identify optimal feature set for each resampling strategy and store
+# # Time ~ 10-12 hours
+# 
+# set.seed(123)
+# plan(multisession, workers = 4)
+# 
+# tic()
+# progressr::with_progress(
+#   spt_feature_set <- fs_method$optimize(spt_feature_select)
+# )
+# toc()
+# beep(3)
+# 
+# write_rds(spt_feature_select, here("results", "rds", "spt_feature_selector.rds"))
+# write_rds(spt_feature_set, here("results", "rds", "spt_features.rds"))
+# rm(spt_feature_select, spt_feature_set)
+# gc()
+# 
+# set.seed(456)
+# tic()
+# progressr::with_progress(
+#   nspt_feature_set <- fs_method$optimize(nspt_feature_select)
+# )
+# toc()
+# beep(3)
+# 
+# write_rds(nspt_feature_select, here("results", "rds", "nspt_feature_selector.rds"))
+# write_rds(nspt_feature_set, here("results", "rds", "nspt_features.rds"))
+# rm(nspt_feature_set)
+# gc()
 
-tic()
-spt_model <- spt_feature_select$train(task_gpp)
-toc()
-beep(3)
 
-write_rds(spt_model, here("results", "rds", "spt_model_features.rds"))
-rm(spt_model)
+# Load feature sets and compare best performance
+spt_feature_set <- read_rds(here("results", "rds", "spt_features.rds"))
+nspt_feature_set <- read_rds(here("results", "rds", "nspt_features.rds"))
+# spt_feature_select <- read_rds(here("results", "rds", "spt_feature_selector.rds"))
+# nspt_feature_select <- read_rds(here("results", "rds", "nspt_feature_selector.rds"))
 
-tic()
-nspt_model <- nspt_feature_select$train(task_gpp)
-toc()
-beep(3)
-
-write_rds(nspt_model, here("results", "rds", "nspt_model_features.rds"))
-rm(nspt_model)
-
+spt_feature_set
+nspt_feature_set
 
 ```
+# Hyper-parameter optimisation (model tuning)
 
+Now we have identified relevant features (and, hopefully, excluded those with
+minimal predictive power), we can use that feature set to tune hyperparameters
+for a new set of models.
+
+We create two new tasks, each with the variables selected from the previous
+step. Then we define a new learner allowing for tuning of hyperparameters.
+Finally, we pass the learner and task to an auto-tuner object for each of the
+two CV methods. We use a random search to identify hyperparameters that give
+decent performance; we are not worried about perfection!
 
 ```{r rf_model, eval = FALSE}
 
+# Create new tasks using features selected above
+task_gpp_spt <- task_gpp$clone()
+task_gpp_spt$select(unlist(spt_feature_set$features))
+
+task_gpp_nspt <- task_gpp$clone()
+task_gpp_nspt$select(unlist(nspt_feature_set$features))
+
 # Clear memory by removing unneeded objects
-rm(countries, ke_tz, sample_points_raw, sample_points, sample_points_woody, twi)
+rm(countries, ecoregions, rangeland_ecoregions,
+   sample_points_raw, sample_points, sample_points_woody, twi,
+   task_gpp)
 gc()
 
-# Spatial model
-plan(multisession, workers = nc)
+# Define new learners for tuning
 
-set.seed(123)
-
-tic()
-rf_tuned_sp <- progressr::with_progress(
-  at_sp$train(task_gpp)
+lrn_ranger_tuned_spt <- lrn(
+  "regr.ranger", 
+  predict_type = "response",
+  quantreg = TRUE,
+  keep.inbag = TRUE,
+  num.trees = 501,
+  mtry.ratio = to_tune(p_dbl(0, 1)),
+  min.node.size = to_tune(p_int(10, 10000, logscale = TRUE)),
+  sample.fraction = to_tune(p_dbl(0.1, 0.9))
 )
-toc()
-beep(3)
 
-write_rds(rf_tuned_sp, here("results", "rds", "rf_resample_sp.rds"))
-
-rm(rf_tuned_sp)
-gc()
-
-# Non-spatial RF model (random CV)
-plan(multisession, workers = nc)
-
-set.seed(456)
-
-tic()
-rf_resample_nsp <- progressr::with_progress(
-  at_nsp$train(task_gpp)
+lrn_ranger_tuned_nspt <- lrn(
+  "regr.ranger", 
+  predict_type = "response",
+  quantreg = TRUE,
+  keep.inbag = TRUE,
+  num.trees = 501,
+  mtry.ratio = to_tune(p_dbl(0, 1)),
+  min.node.size = to_tune(p_int(10, 10000, logscale = TRUE)),
+  sample.fraction = to_tune(p_dbl(0.1, 0.9))
 )
-toc()
-beep(3)
 
-write_rds(rf_resample_nsp, here("results", "rds", "rf_resample_nsp.rds"))
+# Define auto-tuner objects for each model
 
-rm(rf_resample_nsp)
-gc()
+random_tuner <- tnr("random_search")
+
+at_spt <- auto_tuner(
+  tuner = random_tuner,
+  learner = lrn_ranger_tuned_spt,
+  resampling = spt_cv_plan,
+  measure = perf_msr,
+  term_evals = 25
+)
+
+at_nspt <- auto_tuner(
+  tuner = random_tuner,
+  learner = lrn_ranger_tuned_nspt,
+  resampling = nspt_cv_plan,
+  measure = perf_msr,
+  term_evals = 25
+)
+
+
+# # Spatial model
+# plan(multisession, workers = nc)
+# 
+# set.seed(789)
+# 
+# tic()
+# rf_tuned_spt <- progressr::with_progress(
+#   at_spt$train(task_gpp_spt)
+# )
+# toc(log = T)
+# beep(3)
+# 
+# write_rds(rf_tuned_spt, here("results", "rds", "rf_tuned_spt.rds"))
+# 
+# rm(rf_tuned_sp)
+# gc()
+# 
+# # Non-spatial RF model (random CV)
+# plan(multisession, workers = nc)
+# 
+# set.seed(987)
+# 
+# tic()
+# rf_tuned_nspt <- progressr::with_progress(
+#   at_nspt$train(task_gpp_nspt)
+# )
+# toc(log = T)
+# beep(3)
+# 
+# write_rds(rf_tuned_nspt, here("results", "rds", "rf_tuned_nspt.rds"))
+# 
+# rm(rf_tuned_nspt)
+# gc()
 
 
 ```
@@ -310,29 +394,29 @@ Performance assessment of spatial and non-spatial models
 
 ```{r performance}
 
-rf_tuned_sp <- read_rds(here("results", "rds", "rf_resample_sp.rds"))
-rf_tuned_nsp <- read_rds(here("results", "rds", "rf_resample_nsp.rds"))
+rf_tuned_spt <- read_rds(here("results", "rds", "rf_tuned_spt.rds"))
+rf_tuned_nspt <- read_rds(here("results", "rds", "rf_tuned_nspt.rds"))
 
 # Measures to evaluate model performance
 measures <- msrs(c("regr.mae", "regr.rmse", "regr.rsq"))
 measures_micro <- msrs(c("regr.mae", "regr.rmse", "regr.rsq"), average = "micro")
 
-rf_predictions_sp <- rf_tuned_sp$predict(task_gpp)
-rf_predictions_nsp <- rf_tuned_nsp$predict(task_gpp)
+rf_predictions_spt <- rf_tuned_spt$predict(task_gpp_spt)
+rf_predictions_nspt <- rf_tuned_nspt$predict(task_gpp_nspt)
 
-rf_predictions_sp$score(measures)
-rf_predictions_nsp$score(measures)
+rf_predictions_spt$score(measures)
+rf_predictions_nspt$score(measures)
 
 # Plot predicted vs true values
 
-rf_predictions_sp %>%
+rf_predictions_spt %>%
   ggplot(aes(x = response, y = truth)) +
   geom_point(size = 0.1, alpha = 0.1) +
   geom_abline(intercept = 0, slope = 1, colour = "red") +
   theme_classic() +
   labs(title = "With spatial CV")
 
-rf_predictions_nsp %>%
+rf_predictions_nspt %>%
   ggplot(aes(x = response, y = truth)) +
   geom_point(size = 0.1, alpha = 0.1) +
   geom_abline(intercept = 0, slope = 1, colour = "red") +
@@ -340,24 +424,127 @@ rf_predictions_nsp %>%
   labs(title = "With random CV")
 
 # Predicted quantile values
-# rf_predictions_sp_qu <- rf_tuned_sp$predict(data = task_gpp, type = "quantiles", quantiles = 0.9)
-# rf_predictions_nsp_qu <- rf_tuned_nsp$predict(task_gpp, type = "quantiles", quantiles = 0.9)
+rf_predictions_spt_qu <- predict(rf_tuned_spt$learner$model, task_gpp_spt$data(), type = "quantiles", quantiles = 0.9)
+rf_predictions_nspt_qu <- predict(rf_tuned_nspt$learner$model, task_gpp_nspt$data(), type = "quantiles", quantiles = 0.9)
+
+data_with_quantiles_spt <- task_gpp_spt$data() %>%
+  bind_cols(rf_predictions_spt_qu$predictions) %>%
+  rename(quantile_pred = "quantile= 0.9")
+data_with_quantiles_nspt <- task_gpp_nspt$data() %>%
+  bind_cols(rf_predictions_nspt_qu$predictions) %>%
+  rename(quantile_pred = "quantile= 0.9")
+
+ggplot(data_with_quantiles_spt, aes(x = quantile_pred, y = GPP)) +
+  geom_point(size = 0.1, alpha = 0.1) +
+  geom_abline(slope = seq(0.2, 1, 0.2), intercept = 0, colour = "grey") +
+  geom_abline(slope = 1, intercept = 0, colour = "red") +
+  theme_classic() +
+  xlim(0, 10000) +
+  ylim(0, 10000) +
+  labs(x = "Predicted 0.9 quantile",
+       y = "True value",
+       title = "Predicted vs actual GPP (g C m-2 yr-1)",
+       subtitle = "Trained with spatiotemporal CV")#
+
+ggplot(data_with_quantiles_nspt, aes(x = quantile_pred, y = GPP)) +
+  geom_point(size = 0.1, alpha = 0.1) +
+  geom_abline(slope = seq(0.2, 1, 0.2), intercept = 0, colour = "grey") +
+  geom_abline(slope = 1, intercept = 0, colour = "red") +
+  theme_classic() +
+  xlim(0, 10000) +
+  ylim(0, 10000) +
+  labs(x = "Predicted 0.9 quantile",
+       y = "True value",
+       title = "Predicted vs actual GPP (g C m-2 yr-1)",
+       subtitle = "Trained with random CV")
+
 
 ```
 
-Add predictions to task data table and calculate RPI
+It worked! I built two models that predict the 90th percentile with some degree
+of skill, and allow calculation of RPI.
 
-```{r train}
+The random CV model appears to have significantly higher R-squared and lower
+error than the one with spatio-temporal LOO-CV. Looking at the plot, a linear
+array of points along the 1:1 line is clearly visible, which to me suggests
+overfitting is very probable. Perhaps I should re-run the models with nested
+cross-validation to get an independent assessment of fitting ability.
 
-tsk_data
 
+Add predictions to task data table and calculate RPI for the sample dataset
+using the model tuned with spatio-temporal LOO-CV.
+
+```{r rpi}
+
+sample_points_rpi <- data_with_quantiles_spt %>%
+  mutate(rpi = GPP / quantile_pred) %>%
+  bind_cols(sample_points_clean %>% select(id, year, woody, geometry, precipitation))
+
+ggplot(sample_points_rpi, aes(x = as.factor(year), y = rpi)) +
+  geom_boxplot(outlier.size = 0.1, outlier.alpha = 0.3) +
+  theme_bw() +
+  geom_hline(yintercept = 1) +
+  ylim(0, 2)
+
+sample_points_rpi %>%
+  group_by(id) %>%
+  summarise(mean_rpi = mean(rpi),
+            mean_ppt = first(mean_ppt)) %>%
+  ggplot(aes(x = mean_ppt, y = mean_rpi)) +
+  geom_point(size = 0.2, alpha = 0.2) +
+  geom_smooth(lwd = 0.5, method = "lm") +
+  theme_classic()
+
+cor(sample_points_rpi$mean_ppt, sample_points_rpi$rpi)
+
+ggplot(sample_points_rpi, aes(x = precipitation, y = rpi)) +
+  geom_point(size = 0.1, alpha = 0.1) +
+  theme_classic() +
+  ylim(0, 3)
+
+sample_points_rpi %>%
+  mutate(ppt_bin = cut_width(mean_ppt, width = 100, boundary = 0)) %>%
+  group_by(ppt_bin) %>%
+  summarise(bin_quantile = quantile(rpi, 0.9),
+            f_above = sum(rpi > 1) / n(),
+            f_below = sum(rpi < 1) / n(),
+            mean_rpi = mean(rpi)) %>%
+  ggplot(aes(x = ppt_bin, y = f_below)) +
+  geom_point() +
+  ylim(0.75, 1)
+
+sample_points_rpi_mean <- sample_points_rpi %>%
+  group_by(id) %>%
+  summarise(mean_rpi = mean(rpi),
+            geometry = first(geometry)) %>%
+  st_as_sf(crs = 4326)
+
+# Plot mean RPI values spatially
+
+library(tmap)
+
+tm_shape(ke_tz) + tm_borders() +
+  tm_shape(sample_points_rpi %>% filter(year == 2006) %>% st_as_sf(crs = 4326)) +
+  tm_dots(col = "rpi", palette = "PiYG", style = "cont", midpoint = 1)
 ```
 
+Observations:
+- The annual variations remain in the boxplots, which implies that additional
+driving factors (e.g., precipitation timing) are needed in the model
+- There remains a weak positive correlation between mean_ppt and RPI, which I
+think reflects the tighter grouping (fewer very low values) at high mean PPT.
+Perhaps this reflects greater resistance/less influence of dry years or land use
+at higher ppt?
+- There remains a line of points with fitted RPI exactly 1, but this is only ~1%
+of the dataset. I think it's just a function of how RF models work.
+- Strangely there remains a slight bias in the quantile regression. Around 93%
+of sample points have an RPI < 1; if the regression were perfect, this should
+be almost exactly 90%. This applies across the whole range of precipitation
+values, too.
 
 
 
-
-Benchmarking performance across multiple learners 
+Predicting to raster stack:
 
 ```{r benchmark_models}
 
