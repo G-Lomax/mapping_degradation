@@ -28,7 +28,7 @@ library(beepr)
 
 # Visualisation
 # library(tmap)
-# library(mlr3viz)
+
 
 # Parallelisation
 nc <- detectCores() - 2
@@ -39,21 +39,21 @@ options(mc.cores = nc)
 
 ```{r load, include = FALSE}
 
+# Country boundaries
 countries <- st_read(here("data", "raw", "vector", "natural_earth",
                           "ne_110m_admin_0_countries_fixed.shp"))
 
 ke_tz <- countries %>% filter(NAME %in% c("Kenya", "Tanzania"))
 
+# Sample point data
 sample_points_raw <- st_read(here("data", "raw", "vector", "coarse",
                                   "coarseScaleSample.geojson"))
 
 twi <- read_csv(here("data", "processed", "csv", "twi_sample.csv"))
 
-# ecoregions <- st_read(here("data", "raw", "vector", "coarse", "Ecoregions2017",
-#                                   "Ecoregions2017.shp"))
-# 
-# rangeland_ecoregions <- filter(ecoregions, ECO_ID %in% c(50, 51, 55, 57)) %>%
-#   mutate(ECO_NAME = str_replace(ECO_NAME, "Commiphora ", "Commiphora\n"))
+sample_points_ppt <- st_read(here("data", "raw", "vector", "coarse",
+                                  "pptDistributionSample.geojson"))
+
 
 
 ```

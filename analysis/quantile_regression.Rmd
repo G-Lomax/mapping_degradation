@@ -32,7 +32,7 @@ library(gratia)
 library(mgcViz)
 
 # Set up parallel computing
-nc <- 5
+nc <- 6
 
 tmap_options(check.and.fix = TRUE)
 
@@ -267,20 +267,32 @@ get_partial_residuals <- function(bin, model, df, smooth_name) {
 
  # Save plot function
 
-plot_smooth <- function(df, smooth_name) {
+plot_smooth <- function(df, smooth_name, resids = FALSE) {
+  
+  plot_base <- 
   
   smooth_plot <- ggplot(df, aes(x = .data[[smooth_name]], colour = bin)) +
     geom_ribbon(aes(ymin = lower, ymax = upper, fill = bin, colour = NULL), alpha = 0.1) +
-    # geom_point(aes(y = smooth_pred + resids), colour = "grey20", size = 0.1, alpha = 0.2) +
     geom_line(aes(y = smooth_pred, colour = bin), alpha = 0.7) +
     geom_hline(yintercept = 0) +
     scale_y_continuous(breaks = seq(0, 6000, 1000), limits = c(0, 6000)) +
     theme_classic() +
     labs(x = smooth_name,
          y = "Partial residuals (GPP, g C m-2, y-1")
+  
+  # Add residuals and filename marker if resids == TRUE
+  
+  marker <- ""
+  
+  if (resids) {
+    smooth_plot <- smooth_plot + 
+      geom_point(aes(y = smooth_pred + resids), colour = "grey30", size = 0.1, alpha = 0.2)
+    
+    marker <- "_resids"
+  }
 
-  filename <- paste0("gam_", smooth_name, "_smooth_anomaly.png")
-
+  filename <- paste0("gam_", smooth_name, "_smooth_anomaly", marker, ".png")
+  
   ggsave(here("results", "figures", filename),
          smooth_plot,
          width = 12, height = 9, units = "cm")
@@ -313,7 +325,7 @@ for (i in var_list) {
   
   cat("Processing complete\n")
   
-  plot_smooth(partial_smooth_df, smooth_name = i)
+  plot_smooth(partial_smooth_df, smooth_name = i, resids = TRUE)
   
   cat("Saved to file\n")
   
@@ -728,7 +740,7 @@ rpi_ppt_dist_norm <- rpi_ppt_dist %>%
   group_by(id) %>%
   mutate(ugi_norm = ugi / mean(ugi),
          sdii_norm = sdii / mean(sdii),
-         meanPptDay_norm = meanPptDay / mean(meanPptDay)) %>%
+         meanPptDay_norm = meanPptDay - mean(meanPptDay)) %>%
   ungroup()
 
 rpi_ppt_dist_norm %>%
@@ -825,6 +837,75 @@ sample_points_with_timing <- sample_points_binned %>%
 
 models_fitted_with_timing <- read_rds(here("data", "processed", "rds",
                                            "binned_gam_anomaly_timing.rds"))
+
+```
+
+
+Visualise new GAM results
+
+```{r gam_with_timing_fit}
+
+models_df_with_timing <- models_fitted_with_timing %>%
+  mutate(glance = map(model, broom::glance)) %>%
+  unnest(glance)
+
+plot_smooth_with_timing <- function(df, smooth_name, resids = FALSE) {
+  
+  plot_base <- 
+  
+  smooth_plot <- ggplot(df, aes(x = .data[[smooth_name]], colour = bin)) +
+    geom_ribbon(aes(ymin = lower, ymax = upper, fill = bin, colour = NULL), alpha = 0.1) +
+    geom_line(aes(y = smooth_pred, colour = bin), alpha = 0.7) +
+    geom_hline(yintercept = 0) +
+    scale_y_continuous(breaks = seq(0, 6000, 1000), limits = c(0, 6000)) +
+    theme_classic() +
+    labs(x = smooth_name,
+         y = "Partial residuals (GPP, g C m-2, y-1")
+  
+  # Add residuals and filename marker if resids == TRUE
+  
+  marker <- ""
+  
+  if (resids) {
+    smooth_plot <- smooth_plot + 
+      geom_point(aes(y = smooth_pred + resids), colour = "grey30", size = 0.1, alpha = 0.2)
+    
+    marker <- "_resids"
+  }
+
+  filename <- paste0("gam_timing_", smooth_name, "_smooth_anomaly", marker, ".png")
+  
+  ggsave(here("results", "figures", filename),
+         smooth_plot,
+         width = 12, height = 9, units = "cm")
+}
+
+var_list_with_timing <- c(
+  "mean_ppt",
+  "ppt_anomaly",
+  "meanPptDay_anom",
+  "tMean"
+)
+
+for (i in var_list_with_timing) {
+  
+  cat("Processing variable:", i, "\n")
+  
+  partial_smooth_df <- models_fitted_with_timing %>%
+    mutate(df_with_smooths = map2(bin, model, get_partial_residuals,
+                                  df = sample_points_with_timing,
+                                  smooth_name = i)) %>%
+    unnest(df_with_smooths) %>%
+    select(-model)
+  
+  cat("Processing complete\n")
+  
+  plot_smooth_with_timing(partial_smooth_df, smooth_name = i)
+  
+  cat("Saved to file\n")
+  
+}
+
 
 ```
 
@@ -939,8 +1020,23 @@ sample_points_rpi_timing %>%
   geom_boxplot() +
   theme_bw()
 
+# RPI legacy effects?
+
+sample_points_rpi_timing %>%
+  group_by(id) %>%
+  arrange(year) %>%
+  mutate(lag_ppt = lag(ppt_anomaly)) %>%
+  filter(year != 2000) %>%
+  summarise(lag_ppt_rpi_cor = cor(rpi, lag_ppt),
+            mean_ppt = mean(mean_ppt),
+            ) %>%
+  ggplot(aes(x = mean_ppt, y = lag_ppt_rpi_cor)) +
+  geom_point(size = 0.1, alpha = 0.1) +
+  theme_classic()
+
 
 ```
+
 Good progress. It seems the new model does significantly reduce the year-on-year
 variation in RPI, providing a more consistent index with similar distributions
 each year. However, there are remaining issues and questions:
@@ -957,6 +1053,9 @@ mean total precipitation in a year, but that doesn't replicate at the level of
 individual points.
 - The quantile regression is a little skewiff, in that about 93% of points are
 below the fitted 0.9 quantile. The same was true in the random forest.
+
+
+
 
 
 Test RESTREND in R environment
@@ -991,6 +1090,8 @@ restrend_df %>%
 restrend %>%
   filter(id %in% subset) %>%
   select(id, adj.r.squared)
+
+
 
 
 ```
