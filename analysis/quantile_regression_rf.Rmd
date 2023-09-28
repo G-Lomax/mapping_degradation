@@ -21,18 +21,15 @@ library(here)
 library(mlr3verse)
 library(mlr3spatiotempcv)
 library(ranger)
-library(parallel)
 library(future)
 library(tictoc)
-library(beepr)
 
 # Visualisation
 # library(tmap)
 
-
 # Parallelisation
-nc <- detectCores() - 2
-options(mc.cores = nc)
+nc <- availableCores() - 8 
+plan(multisession, workers = nc)
 
 ```
 
@@ -54,6 +51,16 @@ twi <- read_csv(here("data", "processed", "csv", "twi_sample.csv"))
 sample_points_ppt <- st_read(here("data", "raw", "vector", "coarse",
                                   "pptDistributionSample.geojson"))
 
+# Precipitation distribution metrics
+
+ppt_distribution <- st_read(here("data", "raw", "vector", "coarse",
+                                 "pptDistributionSample.geojson")) %>%
+    dplyr::select(-c("allRangelands", "grassland", "igbp", "shrubland", "trees", "geometry")) %>%
+    st_drop_geometry() %>%
+    pivot_longer(cols = !id, names_to = "colname", values_to = "value") %>%
+    separate_wider_delim(colname, "_", names = c("variable", "year")) %>%
+    mutate(year = as.numeric(year)) %>%
+    pivot_wider(names_from = "variable", values_from = "value")
 
 
 ```
@@ -61,17 +68,21 @@ sample_points_ppt <- st_read(here("data", "raw", "vector", "coarse",
 
 ```{r clean, include = FALSE}
 
+yearly_vars <- c("GPP", "precipitation", "tMean", "parMean",
+                 "meanPptDay", "sdii", "ugi")
+
 sample_points <- sample_points_raw %>%
   select(-allRangelands, -igbp, -insolation, -meanT) %>%
   mutate(x = st_coordinates(geometry)[,1],
          y = st_coordinates(geometry)[,2]) %>%
   bind_cols(twi) %>%
   rename(twi = hydrosheds_twi_fd8) %>%
-  pivot_longer(cols = starts_with(c("GPP","precipitation", "tMean", "parMean")),
+  pivot_longer(cols = starts_with(yearly_vars),
                names_to = "index", values_to = "value") %>%
   separate_wider_delim(index, "_", names = c("data", "year")) %>%
   pivot_wider(names_from = data, values_from = value) %>%
   mutate(year = as.numeric(year)) %>%
+  left_join(ppt_distribution, by = c("id", "year")) %>%
   filter(GPP > 0) %>%
   st_as_sf(coords = c("x", "y"), crs = 4326)
 
@@ -81,11 +92,13 @@ sample_points_woody <- sample_points %>%
   mutate(woody = trees + shrubland) %>%
   select(-trees, -shrubland, -grassland)
 
-# Separate precipitation into mean_ppt and ppt_anomaly
-sample_points_clean <- sample_points_woody %>%
+# Calculate derived and normalised variables
+sample_points_derived <- sample_points_woody %>%
   group_by(id) %>%
   mutate(mean_ppt = mean(precipitation),
-         ppt_anomaly = precipitation / mean_ppt) %>%
+         ppt_anomaly = precipitation / mean_ppt,
+         mean_meanPptDay = mean(meanPptDay),
+         meanPptDay_anomaly = meanPptDay - mean_meanPptDay) %>%
   ungroup()
 
 ```
@@ -130,6 +143,7 @@ sample_points_woody %>%
 
 
 ```
+
 # Data preparation for RF modelling
 
 We select variables to use for modelling, remove rows containing NA values
@@ -143,7 +157,13 @@ validation) strategies: random CV and "Leave-location-and-time-out" CV that
 ensures the validation set for each fold does not overlap in either time or space
 with the training set.
 
-When defining the learner, we initially choose 
+When defining the learner, we initially choose crude, plausible hyperparameters
+of mtry.ratio = 0.5 and sample.fraction = 0.5. However, we set the initial
+minimum node size to 200 (around 0.1% of the dataset) to mitigate overfitting
+and to allow sufficient terminal node size that quantiles can be calculated. For
+our purposes, absolute predictive accuracy is less important than retaining
+enough variability in nodes to allow assessment of quantiles.
+
 
 ```{r data_prep}
 
@@ -153,11 +173,14 @@ cols_to_retain <- c(
   "id",
   "mean_ppt",
   "ppt_anomaly",
+  "meanPptDay_anomaly",
+  "sdii",
+  "ugi",
   # "elevation",
   "slope",
-  "distToRiver",
+  # "distToRiver",
   "woody",
-  "landform",
+  # "landform",
   "twi",
   "tMean",
   "parMean",
@@ -166,7 +189,8 @@ cols_to_retain <- c(
   "year",
   "GPP"
 )
-sample_points_subset <- sample_points_clean %>%
+
+sample_points_subset <- sample_points_derived %>%
   filter(!is.na(twi)) %>%
   select(all_of(cols_to_retain))
 
@@ -185,10 +209,10 @@ task_gpp$set_col_roles("year", roles = "time")
 
 lrn_ranger_untuned <- lrn("regr.ranger", 
                           predict_type = "response",
-                          num.trees = 501,
+                          num.trees = 1001,
                           mtry.ratio = 0.5,
-                          min.node.size = 50,
-                          sample.fraction = 0.6
+                          min.node.size = 200,
+                          sample.fraction = 0.5
 )
 
 set_threads(lrn_ranger_untuned, 1)
@@ -242,14 +266,13 @@ nspt_feature_select <- fsi(
 # # Time ~ 10-12 hours
 # 
 # set.seed(123)
-# plan(multisession, workers = 4)
 # 
 # tic()
 # progressr::with_progress(
 #   spt_feature_set <- fs_method$optimize(spt_feature_select)
 # )
 # toc()
-# beep(3)
+# # beep(3)
 # 
 # write_rds(spt_feature_select, here("results", "rds", "spt_feature_selector.rds"))
 # write_rds(spt_feature_set, here("results", "rds", "spt_features.rds"))
@@ -262,7 +285,7 @@ nspt_feature_select <- fsi(
 #   nspt_feature_set <- fs_method$optimize(nspt_feature_select)
 # )
 # toc()
-# beep(3)
+# # beep(3)
 # 
 # write_rds(nspt_feature_select, here("results", "rds", "nspt_feature_selector.rds"))
 # write_rds(nspt_feature_set, here("results", "rds", "nspt_features.rds"))
@@ -273,13 +296,14 @@ nspt_feature_select <- fsi(
 # Load feature sets and compare best performance
 spt_feature_set <- read_rds(here("results", "rds", "spt_features.rds"))
 nspt_feature_set <- read_rds(here("results", "rds", "nspt_features.rds"))
-# spt_feature_select <- read_rds(here("results", "rds", "spt_feature_selector.rds"))
-# nspt_feature_select <- read_rds(here("results", "rds", "nspt_feature_selector.rds"))
+spt_feature_select <- read_rds(here("results", "rds", "spt_feature_selector.rds"))
+nspt_feature_select <- read_rds(here("results", "rds", "nspt_feature_selector.rds"))
 
 spt_feature_set
 nspt_feature_set
 
 ```
+
 # Hyper-parameter optimisation (model tuning)
 
 Now we have identified relevant features (and, hopefully, excluded those with
@@ -292,7 +316,7 @@ Finally, we pass the learner and task to an auto-tuner object for each of the
 two CV methods. We use a random search to identify hyperparameters that give
 decent performance; we are not worried about perfection!
 
-```{r rf_model, eval = FALSE}
+```{r rf_model}
 
 # Create new tasks using features selected above
 task_gpp_spt <- task_gpp$clone()
@@ -314,9 +338,9 @@ lrn_ranger_tuned_spt <- lrn(
   predict_type = "response",
   quantreg = TRUE,
   keep.inbag = TRUE,
-  num.trees = 501,
+  num.trees = 1001,
   mtry.ratio = to_tune(p_dbl(0, 1)),
-  min.node.size = to_tune(p_int(10, 10000, logscale = TRUE)),
+  min.node.size = to_tune(p_int(200, 20000, logscale = TRUE)),
   sample.fraction = to_tune(p_dbl(0.1, 0.9))
 )
 
@@ -325,9 +349,9 @@ lrn_ranger_tuned_nspt <- lrn(
   predict_type = "response",
   quantreg = TRUE,
   keep.inbag = TRUE,
-  num.trees = 501,
+  num.trees = 1001,
   mtry.ratio = to_tune(p_dbl(0, 1)),
-  min.node.size = to_tune(p_int(10, 10000, logscale = TRUE)),
+  min.node.size = to_tune(p_int(200, 20000, logscale = TRUE)),
   sample.fraction = to_tune(p_dbl(0.1, 0.9))
 )
 
@@ -336,7 +360,7 @@ lrn_ranger_tuned_nspt <- lrn(
 random_tuner <- tnr("random_search")
 
 at_spt <- auto_tuner(
-  tuner = random_tuner,
+  method = random_tuner,
   learner = lrn_ranger_tuned_spt,
   resampling = spt_cv_plan,
   measure = perf_msr,
@@ -344,7 +368,7 @@ at_spt <- auto_tuner(
 )
 
 at_nspt <- auto_tuner(
-  tuner = random_tuner,
+  method = random_tuner,
   learner = lrn_ranger_tuned_nspt,
   resampling = nspt_cv_plan,
   measure = perf_msr,
@@ -353,7 +377,6 @@ at_nspt <- auto_tuner(
 
 
 # # Spatial model
-# plan(multisession, workers = nc)
 # 
 # set.seed(789)
 # 
@@ -362,15 +385,14 @@ at_nspt <- auto_tuner(
 #   at_spt$train(task_gpp_spt)
 # )
 # toc(log = T)
-# beep(3)
+# # beep(3)
 # 
 # write_rds(rf_tuned_spt, here("results", "rds", "rf_tuned_spt.rds"))
 # 
-# rm(rf_tuned_sp)
-# gc()
+# # rm(rf_tuned_spt)
+# # gc()
 # 
 # # Non-spatial RF model (random CV)
-# plan(multisession, workers = nc)
 # 
 # set.seed(987)
 # 
@@ -379,7 +401,7 @@ at_nspt <- auto_tuner(
 #   at_nspt$train(task_gpp_nspt)
 # )
 # toc(log = T)
-# beep(3)
+# # beep(3)
 # 
 # write_rds(rf_tuned_nspt, here("results", "rds", "rf_tuned_nspt.rds"))
 # 
@@ -406,6 +428,9 @@ rf_predictions_nspt <- rf_tuned_nspt$predict(task_gpp_nspt)
 
 rf_predictions_spt$score(measures)
 rf_predictions_nspt$score(measures)
+
+rf_predictions_spt$score(measures_micro)
+rf_predictions_nspt$score(measures_micro)
 
 # Plot predicted vs true values
 
@@ -464,12 +489,9 @@ ggplot(data_with_quantiles_nspt, aes(x = quantile_pred, y = GPP)) +
 It worked! I built two models that predict the 90th percentile with some degree
 of skill, and allow calculation of RPI.
 
-The random CV model appears to have significantly higher R-squared and lower
-error than the one with spatio-temporal LOO-CV. Looking at the plot, a linear
-array of points along the 1:1 line is clearly visible, which to me suggests
-overfitting is very probable. Perhaps I should re-run the models with nested
-cross-validation to get an independent assessment of fitting ability.
-
+Both models have similar performance, perhaps because I constrained them to
+retain a minimum of 200 points in each node to minimise overfitting. I need to
+check whether this works
 
 Add predictions to task data table and calculate RPI for the sample dataset
 using the model tuned with spatio-temporal LOO-CV.
@@ -478,7 +500,7 @@ using the model tuned with spatio-temporal LOO-CV.
 
 sample_points_rpi <- data_with_quantiles_spt %>%
   mutate(rpi = GPP / quantile_pred) %>%
-  bind_cols(sample_points_clean %>% select(id, year, woody, geometry, precipitation))
+  bind_cols(sample_points_derived %>% select(id, year, woody, geometry, precipitation))
 
 ggplot(sample_points_rpi, aes(x = as.factor(year), y = rpi)) +
   geom_boxplot(outlier.size = 0.1, outlier.alpha = 0.3) +
@@ -513,26 +535,28 @@ sample_points_rpi %>%
   geom_point() +
   ylim(0.75, 1)
 
+# Test 
+
+# Plot mean RPI values spatially
+
 sample_points_rpi_mean <- sample_points_rpi %>%
   group_by(id) %>%
   summarise(mean_rpi = mean(rpi),
             geometry = first(geometry)) %>%
   st_as_sf(crs = 4326)
 
-# Plot mean RPI values spatially
-
 library(tmap)
 
 tm_shape(ke_tz) + tm_borders() +
-  tm_shape(sample_points_rpi %>% filter(year == 2006) %>% st_as_sf(crs = 4326)) +
-  tm_dots(col = "rpi", palette = "PiYG", style = "cont", midpoint = 1)
+  tm_shape(sample_points_rpi_mean) +
+  tm_dots(col = "mean_rpi", palette = "PiYG", style = "cont", midpoint = 0.8)
 ```
 
 Observations:
-- The annual variations remain in the boxplots, which implies that additional
-driving factors (e.g., precipitation timing) are needed in the model
-- There remains a weak positive correlation between mean_ppt and RPI, which I
-think reflects the tighter grouping (fewer very low values) at high mean PPT.
+- Some annual variations remain in the boxplots, which implies that we haven't
+yet removed all impact of climate on the model.
+- There remains a weak positive correlation between mean_ppt and RPI, which may
+reflect the tighter grouping (fewer very low values) at high mean PPT.
 Perhaps this reflects greater resistance/less influence of dry years or land use
 at higher ppt?
 - There remains a line of points with fitted RPI exactly 1, but this is only ~1%
