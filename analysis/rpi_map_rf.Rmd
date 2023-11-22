@@ -23,7 +23,8 @@ library(terra)
 library(here)
 
 # Analysis
-library(mlr3verse)
+library(mlr3)
+library(ranger)
 library(furrr)
 library(tictoc)
 library(beepr)
@@ -34,7 +35,8 @@ library(tmap)
 tmap_options(check.and.fix = TRUE)
 
 # Set up parallel computing
-nc <- parallel::detectCores() - 2
+plan(multisession, workers = availableCores() - 8)
+
 
 
 ```
@@ -54,7 +56,7 @@ static_covariates <- rast(here("data", "raw", "raster", "covariateMaps",
                                  "staticVars.tif"))
 
 twi <- rast(here("data", "processed", "raster", "hydroSHEDS",
-                 "hydrosheds_twi_fd8.tif")) 
+                 "hydrosheds_twi_fd8.tif"))
 
 names(twi) <- "twi"
 
@@ -66,13 +68,20 @@ years <- str_extract(dynamic_covariates_paths, "\\d\\d\\d\\d")
 dynamic_covariates <- map(dynamic_covariates_paths, rast)
 names(dynamic_covariates) <- years
 
+# Load precipitation covariates as a named list of rasters (one per year)
+ppt_covariate_paths <- Sys.glob(here("data", "raw", "raster", "covariateMaps",
+                                      "pptVars*.tif"))
+ppt_covariates <- map(ppt_covariate_paths, rast)
+names(ppt_covariates) <- years
+
 # Fitted models
 
-rf_tuned_spt <- read_rds(here("results", "rds", "rf_tuned_spt.rds"))
+spt_model_tuned <- read_rds(here("results", "rds", "rf_tuned_spt.rds"))
+model <- spt_model_tuned$learner$model
 
 ```
 
-Prepare data for prediction
+Data preparation
 
 ```{r data_prep}
 
@@ -80,64 +89,172 @@ Prepare data for prediction
 
 twi_reproj <- project(twi, static_covariates)
 
-# Crop twi and static covariates to dynamic covariates layers
+# Crop covariates to common extent
 # (GEE doesn't match extents properly due to resampling)
 
 twi_crop <- crop(twi_reproj, dynamic_covariates[[1]])
 static_crop <- crop(static_covariates, dynamic_covariates[[1]])
+ppt_covariates_crop <- map(ppt_covariates, crop, y = dynamic_covariates[[1]])
 
-# Calculate mean ppt raster
 
-mean_ppt_rast <- dynamic_covariates %>%
-  map(subset, subset = "precipitation") %>%
+# Calculate mean ppt and mean of mean ppt day layers
+mean_ppt <- map(dynamic_covariates, subset, subset = "precipitation") %>%
   rast() %>%
   mean()
 
-# For each year, create a data frame for prediction
+mean_meanPptDay <- map(ppt_covariates_crop, subset, subset = "meanPptDay") %>%
+  rast() %>%
+  mean()
 
-prepare_covariates <- function(dynamic_rast, year) {
-  
-  # Progress message
-  message(paste0("Processing year ", year))
-  
-  # Extract and join rasters
-  all_covariates <- c(dynamic_rast, static_crop, twi_crop)
-  
-  # Rename PAR layer
-  names(all_covariates)[names(all_covariates) == "GMT_0900_PAR"] <- "par"
-  
-  # Add mean ppt and ppt anomaly
-  ppt_anomaly <- all_covariates[["precipitation"]] / mean_ppt_rast
-  
-  all_covariates_anomaly <- c(all_covariates, mean_ppt_rast, ppt_anomaly)
-  
-  # Mask to Kenya/Tanzania
-  all_covariates_masked <- mask(all_covariates_anomaly, ke_tz)
-  
-  all_covariates_masked
-}
-
-covariate_list <- map2(dynamic_covariates, names(dynamic_covariates), prepare_covariates)
-
-# write_rds(covariate_list,
-#           here("data", "processed", "rds", "covariate_rasters.rds"))
+names(mean_ppt) <- "mean_ppt"
+names(mean_meanPptDay) <- "mean_meanPptDay"
 
 ```
 
 
-```{r fitted_values}
+Prepare functions for data preparation, model fitting and prediction to raster
 
-# covariate_dfs <- read_rds(here("data", "processed", "rds", "covariate_dfs.rds"))
+```{r functions}
 
-# Prepare variables for fitting
+# Combine raster layers and convert to data frame
 
-covariate_list[[1]]
-names(covariate_list[[1]])
+raster_to_df <- function(year) {
+  
+  # Progress message
+  message(paste0("Processing year ", year))
+  
+  # Extract yearly covariates
+  dynamic_rast <- dynamic_covariates[[year]]
+  ppt_rast <- ppt_covariates_crop[[year]]
+  
+  names(dynamic_rast)[names(dynamic_rast) == "GMT_0900_PAR"] <- "parMean"
+  
+  # Extract and join rasters
+  all_covariates <- c(dynamic_rast, ppt_rast,
+                      mean_ppt, mean_meanPptDay,
+                      static_crop, twi_crop)
+  
+  # Mask to Kenya/Tanzania
+  all_covariates_masked <- mask(all_covariates, ke_tz)
+  
+  # Convert raster to data frame
+  covariate_df <- as.data.frame(all_covariates_masked, xy = TRUE, cells = TRUE)
+  
+  # Add year information
+  covariate_df$year <- as.numeric(year)
+  
+  covariate_df
+}
 
-# Predict model to each year's raster and write to disk
+# Prepare data frame variables for prediction
 
-predict_rpi_raster <- function(raster, model) {
-  ?ranger::predict.ranger
+clean_df <- function(df) {
+  df_clean <- df %>%
+    filter(!is.na(GPP)) %>%
+    mutate(woody = shrubland + trees,
+           woody_bin = cut_interval(woody, 5)) %>%
+    select(-distToRiver) %>%
+    remove_missing()
+  
+  df_clean
+}
+
+# Add derived variables: ppt_mean, ppt_anomaly and meanPptDay_anomaly
+
+add_derived_variables <- function(df) {
+  df_derived <- df %>%
+    mutate(ppt_anomaly = precipitation / mean_ppt,
+           meanPptDay_anomaly = meanPptDay - mean(meanPptDay))
+  
+  df_derived
+}
+
+# Predict potential GPP values
+predict_gpp <- function(df) {
+  
+  predictions <- predict(model, data = df, type = "quantiles", quantiles = 0.9)
+  
+  df_fitted <- df %>%
+    bind_cols(predictions$predictions) %>%
+    rename(fitted = "quantile= 0.9")
+  
+  df_fitted
+}
+
+# Calculate RPI
+
+calc_rpi <- function(df) {
+  df_rpi <- mutate(df, rpi = GPP / fitted)
+  df_rpi
+}
+
+# Extract fitted GPP and RPI values as raster layers
+
+df_to_raster <- function(df, target) {
+  df_to_convert <- df %>%
+    select(x, y, GPP, fitted, rpi)
+  
+  names <- colnames(df_to_convert)[3:ncol(df_to_convert)]
+  
+  rpi_raster <- rast(df_to_convert,
+                     crs = crs(target),
+                     extent = ext(target))
+  
+  rpi_raster
+}
+
+
+```
+
+
+Loop through annual raster layers to create maps of predicted potential GPP and
+RPI. A loop is needed to avoid hitting memory limits with large raster sizes.
+
+```{r calc_rpi, eval = FALSE}
+
+for (i in years) {
+  tic()
+
+  # Convert to df
+  df <- raster_to_df(i)
+  
+  message("Conversion to data frame complete")
+  
+  # Prepare for prediction
+  df_for_prediction <- df %>%
+    clean_df() %>%
+    add_derived_variables()
+  
+  message("Data frame preparation complete")
+  message("Predicting potential GPP from model...")
+  
+  # Predict potential GPP values from model
+  df_fitted <- predict_gpp(df_for_prediction)
+  
+  message("Model prediction complete")
+  
+  # Calculate RPI
+  
+  df_rpi <- calc_rpi(df_fitted)
+  
+  # Convert back to raster
+  target_rast <- dynamic_covariates[[i]]
+  rpi_rast <- df_to_raster(df_rpi, target_rast)
+  
+  message("Conversion to raster complete")
+  
+  # Write to raster file
+  filename <- paste0("rf_rpi_rast_", i, ".tif")
+  writeRaster(rpi_rast,
+              here("data", "processed", "raster", "rpi", filename),
+              overwrite = TRUE)
+  
+  message("Raster written to file: ", filename)
+  toc()
+  
+  # Clear memory for next loop
+  rm(df, df_for_prediction, df_fitted, df_rpi, target_rast, rpi_rast)
+  gc()
 }
 
 
@@ -146,5 +263,176 @@ Apply to full study area to map annual RPI
 
 ```{r rpi_map}
 
+rpi_paths <- Sys.glob(here("data", "processed", "raster", "rpi", "rf_rpi_rast*.tif"))
+
+rpi_list <- map(rpi_paths, rast)
+
+rpi_rast <- map(rpi_list, function(r) {r$rpi}) %>%
+  rast()
+
+names(rpi_rast) <- years
+
+# Remove negative values and values > 5
+# clean_matrix <- matrix(c(-99999, 0, NA,
+#                          2, 99999, NA),
+#                        nrow = 2,
+#                        byrow = T)
+# 
+# rpi_rast_clean <- classify(rpi_rast, clean_matrix)
+
+
+rpi_rast_mean <- mean(rpi_rast)
+
+rpi_anim <- tm_shape(ke_tz) + tm_borders() +
+  tm_shape(rpi_rast) +
+  tm_raster(palette = "PuOr", style = "cont",
+            breaks = seq(0, 2,), midpoint = 1) +
+  tm_facets(nrow = 1, ncol = 1)
+
+# Save - takes about 5m
+tmap_animation(rpi_anim,
+  filename = here("results", "figures", "rpi_anim.gif"),
+  width = 800, height = 800, dpi = 200)
+
+
+# Save six years as facets
+
+rpi_facet <- tm_shape(ke_tz) + tm_borders() +
+  tm_shape(rpi_rast[[8:19]]) +
+  tm_raster(palette = "BrBG", style = "cont",
+            breaks = seq(0, 2,), midpoint = 1,
+            legend.show = FALSE) +
+  tm_facets(nrow = 2, ncol = 6)
+
+tmap_save(rpi_facet,
+          here("results", "figures", "rpi_map_facets_with_time.png"),
+          width = 24, height = 12, units = "cm", dpi = 200)
+
+# Mean RPI images (less worried about year-to-year variability)
+
+ke_vect <- ke_tz %>% filter(NAME == "Kenya") %>% vect()
+rpi_mean_ke <- rpi_rast_mean %>%
+  crop(ke_vect) %>%
+  mask(ke_vect)
+
+kenya_mean_rpi_map <- tm_shape(ke_vect) + tm_borders() +
+  tm_shape(rpi_mean_ke) + tm_raster(
+    col.scale = tm_scale_continuous(
+      limits = c(0.2,1), 
+      outliers.trunc = c(T,T),
+      values = "homer1"),
+    col.legend = tm_legend(show = FALSE)
+  )
+
+tmap_save(kenya_mean_rpi_map, here("results", "figures", "maps", "kenya_rpi_map.png"),
+          dpi = 300)
+
+# Trend (using Theil-Sen)
+library(RobustLinearReg)
+library(broom)
+
+fit_theil_sen <- function(vector) {
+  
+  if (any(is.na(vector))) {
+    rep(NA, 4)
+  }
+  
+  else {
+    regression_df <- tibble(years = seq_len(length(vector)),
+                            rpi = vector)
+    
+    ts_regression <- theil_sen_regression(rpi ~ years, regression_df)
+    
+    slope_params <- broom::tidy(ts_regression)[2,2:5] %>%
+      as.vector() %>%
+      unlist()
+    
+    slope_params
+  }
+}
+
+# rpi_trend <- app(rpi_rast, fit_theil_sen)
+# names(rpi_trend) <- c("slope", "std_error", "f_statistic", "p_value")
+# 
+# writeRaster(rpi_trend,
+#             here("results", "figures", "rf_rpi_trend_rast.tif"))
+
+rpi_trend <- rast(here("results", "figures", "rf_rpi_trend_rast.tif"))
+
+tm_shape(ke_tz)
+
+
+tidy(test)[2,2:5] %>% as.vector()
+
 ```
 
+
+``` {r local_map}
+
+soralo <- st_read(here("data", "raw", "vector", "SORALO.shp"))
+
+soralo_vect <- vect(soralo) %>% project(crs(dynamic_covariates[[1]]))
+
+extract_var <- function(rast_list, var_name, layer_names, polygons) {
+  
+  var_rast <- rast_list %>%
+    map(subset, var_name) %>%
+    rast() %>%
+    crop(polygons) %>%
+    mask(polygons)
+  
+  names(var_rast) <- layer_names
+  
+  var_rast
+}
+
+ppt_soralo <- map(dynamic_covariates, function(r) {r$precipitation}) %>%
+  rast() %>%
+  crop(soralo_vect) %>%
+  mask(soralo_vect)
+
+ppt_soralo <- extract_var(dynamic_covariates, "precipitation", years, soralo_vect)
+tMean_soralo <- extract_var(dynamic_covariates, "tMean", years, soralo_vect)
+gpp_soralo <- extract_var(dynamic_covariates, "GPP", years, soralo_vect)
+rpi_soralo <- extract_var(rpi_list, "rpi", years, soralo_vect)
+
+rpi_mean_soralo <- rpi_rast_mean %>%
+  crop(soralo_vect) %>%
+  mask(soralo_vect)
+
+rpi_trend_soralo <- rpi_trend %>%
+  crop(soralo_vect) %>%
+  mask(soralo_vect)
+
+target_years <- 2015:2018 %>% as.character()
+
+for (i in target_years) {
+
+  year <- i %>% as.character()
+
+  map <- tm_shape(gpp_soralo[[year]]) +
+    tm_raster(palette = "Greens", style = "cont", legend.show = FALSE, limits = c(0, 6000)) +
+    tm_shape(soralo_vect) + tm_borders() +
+    tm_layout(frame = FALSE)
+
+  tmap_save(map, here("results", "figures", "maps", paste0("gpp_", year, ".png")))
+
+}
+
+hist(gpp_soralo[[target_years]])
+
+rpi_mean_map <- tm_shape(rpi_mean_soralo) +
+    tm_raster(palette = "RdYlBu", style = "cont", midpoint = 0.7, legend.show = FALSE, limits = c(0.5, 0.9)) +
+    tm_shape(soralo_vect) + tm_borders() +
+    tm_layout(frame = FALSE)
+
+tmap_save(rpi_mean_map, here("results", "figures", "maps", "rpi_trend_soralo.png"))
+
+rpi_trend_map <- tm_shape(rpi_trend_soralo$slope) +
+    tm_raster(palette = "RdYlBu", style = "cont", legend.show = T, breaks = c(-0.02, 0.02)) +
+    tm_shape(soralo_vect) + tm_borders() +
+    tm_layout(frame = FALSE)
+
+
+
+```

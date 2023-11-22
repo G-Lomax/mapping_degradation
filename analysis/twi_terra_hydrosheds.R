@@ -52,7 +52,7 @@ wbt_fd8_flow_accumulation(
   threshold = 3000  # 
 )
 
-fa_fd8 <- raster(here("data", "processed", "raster", "srtm", "dem_agg_fa_fd8.tif"))
+fa_fd8 <- raster(here("data", "processed", "raster", "hydroSHEDS", "hydrosheds_fa_fd8.tif"))
 
 wbt_wetness_index(
   sca = here("data", "processed", "raster", "hydroSHEDS", "hydrosheds_fa_fd8.tif"),

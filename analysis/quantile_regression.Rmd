@@ -32,7 +32,7 @@ library(gratia)
 library(mgcViz)
 
 # Set up parallel computing
-nc <- 6
+nc <- 16
 
 tmap_options(check.and.fix = TRUE)
 
@@ -75,7 +75,8 @@ sample_points <- sample_points_raw %>%
   bind_cols(twi) %>%
   mutate(meanT = meanT * 0.1) %>%
   rename(twi = hydrosheds_twi_fd8) %>%
-  pivot_longer(cols = starts_with(c("GPP","precipitation", "tMean", "parMean")),
+  select(-starts_with("potential_evaporation_sum")) %>%  # Remove PET for now
+  pivot_longer(cols = starts_with(c("GPP", "precipitation", "tMean", "parMean")),
                names_to = "index", values_to = "value") %>%
   separate_wider_delim(index, "_", names = c("data", "year")) %>%
   pivot_wider(names_from = data, values_from = value) %>%
