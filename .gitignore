@@ -43,3 +43,6 @@ vignettes/*.pdf
 
 # Results files and figures
 /results/
+
+# html versions of R Notebooks (keep code only)
+/analysis/*.html
