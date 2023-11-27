@@ -127,8 +127,6 @@ raster_to_df <- function(year) {
   dynamic_rast <- dynamic_covariates[[year]]
   ppt_rast <- ppt_covariates_crop[[year]]
   
-  names(dynamic_rast)[names(dynamic_rast) == "GMT_0900_PAR"] <- "parMean"
-  
   # Extract and join rasters
   all_covariates <- c(dynamic_rast, ppt_rast,
                       mean_ppt, mean_meanPptDay,
@@ -151,9 +149,6 @@ raster_to_df <- function(year) {
 clean_df <- function(df) {
   df_clean <- df %>%
     filter(!is.na(GPP)) %>%
-    mutate(woody = shrubland + trees,
-           woody_bin = cut_interval(woody, 5)) %>%
-    select(-distToRiver) %>%
     remove_missing()
   
   df_clean
@@ -208,11 +203,12 @@ df_to_raster <- function(df, target) {
 
 
 Loop through annual raster layers to create maps of predicted potential GPP and
-RPI. A loop is needed to avoid hitting memory limits with large raster sizes.
+RPI. Using a loop to reduce memory usage and ensure years are written to disk
+as processing is completed.
 
 ```{r calc_rpi, eval = FALSE}
 
-for (i in years) {
+for (i in years[13:19]) {
   tic()
 
   # Convert to df
@@ -258,11 +254,15 @@ for (i in years) {
 }
 
 
+
 ```
+
+
 Apply to full study area to map annual RPI
 
 ```{r rpi_map}
 
+# Load exported RPI annual rasters
 rpi_paths <- Sys.glob(here("data", "processed", "raster", "rpi", "rf_rpi_rast*.tif"))
 
 rpi_list <- map(rpi_paths, rast)
@@ -272,64 +272,57 @@ rpi_rast <- map(rpi_list, function(r) {r$rpi}) %>%
 
 names(rpi_rast) <- years
 
-# Remove negative values and values > 5
-# clean_matrix <- matrix(c(-99999, 0, NA,
-#                          2, 99999, NA),
-#                        nrow = 2,
-#                        byrow = T)
-# 
-# rpi_rast_clean <- classify(rpi_rast, clean_matrix)
-
+# Calculate mean and variance
 
 rpi_rast_mean <- mean(rpi_rast)
+rpi_rast_var <- app(rpi_rast, var, na.rm = T)
 
-rpi_anim <- tm_shape(ke_tz) + tm_borders() +
-  tm_shape(rpi_rast) +
-  tm_raster(palette = "PuOr", style = "cont",
-            breaks = seq(0, 2,), midpoint = 1) +
-  tm_facets(nrow = 1, ncol = 1)
+# mean_map <- tm_shape(ke_tz) + tm_fill(col = "grey85") +
+#   tm_shape(rpi_rast_mean) +
+#   tm_raster(col.scale = tm_scale_continuous(
+#     limits = c(0,1.6), midpoint = 0.63, values = "RdBu"
+#   )) +
+#   tm_shape(ke_tz) +
+#   tm_borders()
 
-# Save - takes about 5m
-tmap_animation(rpi_anim,
-  filename = here("results", "figures", "rpi_anim.gif"),
-  width = 800, height = 800, dpi = 200)
+# # Save six years as facets
+# 
+# rpi_facet <- tm_shape(ke_tz) + tm_fill(col = "grey85") +
+#   tm_shape(rpi_rast[[1:12]]) +
+#   tm_raster(
+#     col.scale = tm_scale_continuous(limits = c(0,1.6), midpoint = 0.63, values = "RdBu"),
+#     col.legend = tm_legend(show = FALSE)) +
+#   tm_shape(ke_tz) +
+#   tm_borders() +
+#   tm_facets_wrap(nrow = 2, ncol = 6)
+# 
+# tmap_save(rpi_facet,
+#           here("results", "figures", "rpi_map_facets_with_time.png"),
+#           width = 24, height = 12, units = "cm", dpi = 200)
+
+```
 
 
-# Save six years as facets
+There are some clear patterns in the mean values, but annual values still
+vary widely with no clear stable patterns. I will need to work with mean
+values, trends and persistently low/high-value pixels.
 
-rpi_facet <- tm_shape(ke_tz) + tm_borders() +
-  tm_shape(rpi_rast[[8:19]]) +
-  tm_raster(palette = "BrBG", style = "cont",
-            breaks = seq(0, 2,), midpoint = 1,
-            legend.show = FALSE) +
-  tm_facets(nrow = 2, ncol = 6)
+Regarding mean values, the Maasai Mara and Serengeti appear to have
+above-average values, as do North-East Kenya, some parts of Northern and Central
+Kenya and Eastern and Southern Tanzania. It would be interesting to see whether
+these correspond to particular parks, protected areas etc.
 
-tmap_save(rpi_facet,
-          here("results", "figures", "rpi_map_facets_with_time.png"),
-          width = 24, height = 12, units = "cm", dpi = 200)
+In addition. very high values can be seen close to rivers, lakes or wetlands
+(e.g., the Lorian Swamp is clearly visible as a high-RPI area). Some of the
+high-RPI areas also seem to be associated with high tree-cover areas (e.g.,
+North-East Kenya and Southern Tanzania), but not all. North-West Kenya (Lake
+Turkana region) has some very low values, which might represent issues in the
+PML_V2 dataset (since much of that area is classified as "barren land" with a
+GPP of zero by definition).
 
-# Mean RPI images (less worried about year-to-year variability)
-
-ke_vect <- ke_tz %>% filter(NAME == "Kenya") %>% vect()
-rpi_mean_ke <- rpi_rast_mean %>%
-  crop(ke_vect) %>%
-  mask(ke_vect)
-
-kenya_mean_rpi_map <- tm_shape(ke_vect) + tm_borders() +
-  tm_shape(rpi_mean_ke) + tm_raster(
-    col.scale = tm_scale_continuous(
-      limits = c(0.2,1), 
-      outliers.trunc = c(T,T),
-      values = "homer1"),
-    col.legend = tm_legend(show = FALSE)
-  )
-
-tmap_save(kenya_mean_rpi_map, here("results", "figures", "maps", "kenya_rpi_map.png"),
-          dpi = 300)
+```{r persistence_and_trends}
 
 # Trend (using Theil-Sen)
-library(RobustLinearReg)
-library(broom)
 
 fit_theil_sen <- function(vector) {
   
@@ -341,7 +334,7 @@ fit_theil_sen <- function(vector) {
     regression_df <- tibble(years = seq_len(length(vector)),
                             rpi = vector)
     
-    ts_regression <- theil_sen_regression(rpi ~ years, regression_df)
+    ts_regression <- RobustLinearReg::theil_sen_regression(rpi ~ years, regression_df)
     
     slope_params <- broom::tidy(ts_regression)[2,2:5] %>%
       as.vector() %>%
@@ -351,88 +344,210 @@ fit_theil_sen <- function(vector) {
   }
 }
 
-# rpi_trend <- app(rpi_rast, fit_theil_sen)
-# names(rpi_trend) <- c("slope", "std_error", "f_statistic", "p_value")
+# rpi_ts_trend <- app(rpi_rast, fit_theil_sen)
+# names(rpi_ts_trend) <- c("slope", "std_error", "f_statistic", "p_value")
 # 
-# writeRaster(rpi_trend,
-#             here("results", "figures", "rf_rpi_trend_rast.tif"))
+# writeRaster(rpi_ts_trend,
+#             here("results", "figures", "rf_rpi_ts_trend_rast.tif"),
+#             overwrite = TRUE)
 
-rpi_trend <- rast(here("results", "figures", "rf_rpi_trend_rast.tif"))
+rpi_ts_trend <- rast(here("results", "figures", "rf_rpi_ts_trend_rast.tif"))
 
-tm_shape(ke_tz)
+# Trend (using Mann Kendall test)
+
+calculate_kendall_tau <- function(vector) {
+  
+  if (any(is.na(vector))) {
+    rep(NA, 2)
+  }
+  
+  else {
+    
+    kendall_test <- unlist(Kendall::MannKendall(vector))
+    
+    kendall_test[1:2]
+  }
+}
+
+# rpi_kendall_tau <- app(rpi_rast, calculate_kendall_tau, cores = 32)
+# names(rpi_kendall_tau) <- c("tau", "p_value")
+# 
+# writeRaster(rpi_kendall_tau,
+#             here("results", "figures", "rf_rpi_kendall_tau_rast.tif"),
+#             overwrite = TRUE)
+
+rpi_kendall_tau <- rast(here("results", "figures", "rf_rpi_kendall_tau_rast.tif"))
 
 
-tidy(test)[2,2:5] %>% as.vector()
+## Visualise in tmap viewer
+tmap_mode("view")
+
+tm_shape(rpi_rast_mean) +
+  tm_raster(col.scale = tm_scale_continuous(
+    limits = c(0,1.6),
+    midpoint = 0.63,
+    values = "RdBu",
+    outliers.trunc = c(T,T))) +
+  tm_shape(rpi_ts_trend) +
+  tm_raster(col = "slope",
+            col.scale = tm_scale_continuous(
+              limits = c(-0.02, 0.02),
+              midpoint = 0,
+              values = "RdBu",
+              outliers.trunc = c(T,T))) +
+  tm_shape(rpi_kendall_tau$tau) +
+  tm_raster(col.scale = tm_scale_continuous(
+    limits = c(-0.6, 0.6),
+    midpoint = 0,
+    values = "RdBu",
+    outliers.trunc = c(T,T))) +
+  tm_basemap(c("OpenStreetMap", "Esri.WorldImagery")) + tm_scalebar()
+
+```
+Identify persistently low- or high-valued pixels
+
+``` {r persistent_low_high}
+
+# Find pixels with mean RPI < 0.5 (or < median) and trend 0 +/- 0.005
+
+mean_quantiles <- quantile(values(rpi_rast_mean), c(0.1, 0.2, 0.333, 0.5, 0.666, 0.8, 0.9), na.rm = TRUE)
+trend_quantiles <- quantile(values(rpi_ts_trend$slope), c(0.1, 0.2, 0.333, 0.5, 0.666, 0.8, 0.9), na.rm = TRUE)
+
+low_rpi <- rpi_rast_mean <= mean_quantiles[1] & rpi_ts_trend$slope >= trend_quantiles[3] & rpi_ts_trend$slope <= trend_quantiles[5]
+high_rpi <- rpi_rast_mean >= mean_quantiles[7] & rpi_ts_trend$slope >= trend_quantiles[3] & rpi_ts_trend$slope <= trend_quantiles[5]
+low_trend <- rpi_ts_trend$slope <= trend_quantiles[1]
+high_trend <- rpi_ts_trend$slope >= trend_quantiles[7]
+
+rpi_cats <- (low_rpi + 2 * high_rpi + 3 * low_trend + 4 * high_trend)
+rpi_cats_masked <- mask(rpi_cats, rpi_cats, maskvalues = c(0,NA))
+
+
+tm_shape(rpi_rast_mean) +
+  tm_raster(col.scale = tm_scale_continuous(
+    limits = c(0,1.6),
+    midpoint = 0.63,
+    values = "RdBu",
+    outliers.trunc = c(T,T))) +
+  tm_shape(rpi_ts_trend) +
+  tm_raster(col = "slope",
+            col.scale = tm_scale_continuous(
+              limits = c(-0.02, 0.02),
+              midpoint = 0,
+              values = "RdBu",
+              outliers.trunc = c(T,T))) +
+  tm_shape(rpi_cats_masked) +
+  tm_raster(col.scale = tm_scale_categorical(values = c('brown','cornflowerblue','orange','purple'))) +
+  tm_basemap(c("OpenStreetMap", "Esri.WorldImagery")) + tm_scalebar()
+
+# Find pixels with mean RPI > 0.8 and trend 0 +/- 0.005
+
+# Find pixels with high (AR1)? Or negative AR(1)?? Or just high variance and
+# low trend
+
+
 
 ```
 
 
-``` {r local_map}
+Subset by % tree cover and/or add to map as additional layer/mask
 
-soralo <- st_read(here("data", "raw", "vector", "SORALO.shp"))
+```{r rpi_tc}
 
-soralo_vect <- vect(soralo) %>% project(crs(dynamic_covariates[[1]]))
+tree_cover <- static_covariates$wriTCFrac
 
-extract_var <- function(rast_list, var_name, layer_names, polygons) {
-  
-  var_rast <- rast_list %>%
-    map(subset, var_name) %>%
-    rast() %>%
-    crop(polygons) %>%
-    mask(polygons)
-  
-  names(var_rast) <- layer_names
-  
-  var_rast
-}
+tm_shape(tree_cover) + tm_raster(col.scale = tm_scale(limits = c(0,1), values = "Greens")) +
+  tm_shape(rpi_rast_mean) +
+  tm_raster(col.scale = tm_scale_continuous(
+    limits = c(0,1.6),
+    midpoint = 0.63,
+    values = "RdBu",
+    outliers.trunc = c(T,T))) +
+  tm_basemap(c("OpenStreetMap", "Esri.WorldImagery")) + tm_scalebar()
 
-ppt_soralo <- map(dynamic_covariates, function(r) {r$precipitation}) %>%
-  rast() %>%
-  crop(soralo_vect) %>%
-  mask(soralo_vect)
+# Combine into a raster and sample
 
-ppt_soralo <- extract_var(dynamic_covariates, "precipitation", years, soralo_vect)
-tMean_soralo <- extract_var(dynamic_covariates, "tMean", years, soralo_vect)
-gpp_soralo <- extract_var(dynamic_covariates, "GPP", years, soralo_vect)
-rpi_soralo <- extract_var(rpi_list, "rpi", years, soralo_vect)
+# tree_cover_rpi <- tree_cover %>%
+#   crop(rpi_rast_mean) %>%
+#   c(rpi_rast_mean, rpi_ts_trend$slope)
+# 
+# set.seed(999)
+# tree_cover_rpi_sample <- spatSample(tree_cover_rpi, 2000, xy = TRUE, na.rm = TRUE)
+# 
+# head(tree_cover_rpi_sample)
+# 
+# cor(tree_cover_rpi_sample$wriTCFrac, tree_cover_rpi_sample$mean)
+# 
+# ggplot(tree_cover_rpi_sample, aes(x = wriTCFrac, y = slope)) +
+#   geom_point(size = 0.2, alpha = 0.2) +
+#   geom_smooth()
 
-rpi_mean_soralo <- rpi_rast_mean %>%
-  crop(soralo_vect) %>%
-  mask(soralo_vect)
+# Create a polygon map of different bins
+# Bins should be 30-60% and >60%, or 25-50, 50-75 and 75-100%
 
-rpi_trend_soralo <- rpi_trend %>%
-  crop(soralo_vect) %>%
-  mask(soralo_vect)
+tree_cover_bin1 <- tree_cover > 0.3 & tree_cover <= 0.6
+tree_cover_bin2 <- (tree_cover > 0.6) * 2
 
-target_years <- 2015:2018 %>% as.character()
+tree_cover_bins <- tree_cover_bin1 + tree_cover_bin2
 
-for (i in target_years) {
-
-  year <- i %>% as.character()
-
-  map <- tm_shape(gpp_soralo[[year]]) +
-    tm_raster(palette = "Greens", style = "cont", legend.show = FALSE, limits = c(0, 6000)) +
-    tm_shape(soralo_vect) + tm_borders() +
-    tm_layout(frame = FALSE)
-
-  tmap_save(map, here("results", "figures", "maps", paste0("gpp_", year, ".png")))
-
-}
-
-hist(gpp_soralo[[target_years]])
-
-rpi_mean_map <- tm_shape(rpi_mean_soralo) +
-    tm_raster(palette = "RdYlBu", style = "cont", midpoint = 0.7, legend.show = FALSE, limits = c(0.5, 0.9)) +
-    tm_shape(soralo_vect) + tm_borders() +
-    tm_layout(frame = FALSE)
-
-tmap_save(rpi_mean_map, here("results", "figures", "maps", "rpi_trend_soralo.png"))
-
-rpi_trend_map <- tm_shape(rpi_trend_soralo$slope) +
-    tm_raster(palette = "RdYlBu", style = "cont", legend.show = T, breaks = c(-0.02, 0.02)) +
-    tm_shape(soralo_vect) + tm_borders() +
-    tm_layout(frame = FALSE)
+tm_shape(tree_cover) +tm_raster(col.scale = tm_scale(limits = c(0,1), values = "Greens")) +
+  tm_shape(tree_cover_bins) + tm_raster()
 
 
+# Too varied to meaningfully polygonise - I'll simply need to create masks
+opaque_tc_mask <- tree_cover_bins
+values(opaque_tc_mask)[values(opaque_tc_mask) == 0] <- NA
+opaque_tc_mask <- crop(opaque_tc_mask, rpi_rast_mean)
+
+tm_shape(rpi_rast_mean) +
+  tm_raster(col.scale = tm_scale_continuous(
+    limits = c(0,1.6),
+    midpoint = 0.63,
+    values = "RdBu",
+    outliers.trunc = c(T,T))) +
+  tm_shape(rpi_ts_trend) +
+  tm_raster(col = "slope",
+            col.scale = tm_scale_continuous(
+              limits = c(-0.02, 0.02),
+              midpoint = 0,
+              values = "RdBu",
+              outliers.trunc = c(T,T))) +
+  tm_shape(rpi_cats_masked) +
+  tm_raster(col.scale = tm_scale_categorical(values = c('brown','cornflowerblue','orange','purple'))) +
+  tm_shape(opaque_tc_mask) +
+  tm_raster(palette = "black", alpha = 0.75) +
+  tm_basemap(c("OpenStreetMap", "Esri.WorldImagery")) + tm_scalebar()
 
 ```
+
+
+Now let's use the protected area dataset to test mean RPI in particular parks,
+reserves or community conservancies, with and without stratification by
+tree cover.
+
+```{r rpi_protected_areas}
+
+protected_areas <- st_read(here("data", "raw", "vector", "protected_areas",
+                                "terrestrialPAsKeTz.geojson"))
+
+unique(protected_areas$DESIG_ENG)
+
+target_pas <- c("National Park", "Community Conservancy", "National Reserve",
+                "Community Nature Reserve", "Community Conservancy", "Game Reserve")
+
+protected_areas_target <- protected_areas %>%
+  filter(DESIG_ENG %in% target_pas) %>%
+  # filter(PARENT_ISO == "KEN") %>%
+  filter(STATUS != "Proposed")
+
+protected_areas_rpi <- protected_areas_target %>%
+  mutate(mean_rpi = zonal(rpi_rast_mean, vect(protected_areas_target), na.rm = TRUE)$mean)
+
+protected_areas_rpi %>%
+  filter(DESIG_ENG == "National Park" & ISO3 == "KEN") %>%
+  ggplot(aes(x = NAME, y = mean_rpi)) +
+  geom_col() +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45))
+
+```
+
