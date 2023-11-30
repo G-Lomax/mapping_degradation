@@ -100,40 +100,31 @@ sample_points_derived <- sample_points %>%
 
 # Exploratory data analysis
 
-```{r eda, eval=FALSE, include=FALSE}
+```{r eda}
 
-# Study area map
+# Study area map and sample points
 
 tm_shape(ke_tz) + tm_borders() +
-  tm_shape(rangeland_ecoregions) + tm_fill(col = "ECO_NAME", style = "cat", palette = "Accent") +
-  tm_shape(sample_points_raw) + tm_dots(col = "brown")
+  tm_shape(sample_points_raw) + tm_dots(col = "brown", size = 0.01)
 
-# Relative fractions of trees, shrubs, grass
+# Fractions of tree cover in dataset
 
-ggtern(sample_points) + geom_point(aes(x = grassland, y = shrubland, z = trees), size = 0.1)
-
-sum(sample_points$shrubland > 0.8) / nrow(sample_points)
+ggplot(sample_points_derived, aes(x = wriTCFrac)) +
+  geom_histogram(fill = "lightgreen", colour = "forestgreen", bins = 100) +
+  theme_bw()
 
 # GPP-PPT relationship for different fractions of grassland/shrubland
 
-sample_points_woody %>%
-  mutate(grass_cat = cut_width(grassland, 0.2, boundary = 0)) %>%
+sample_points_derived %>%
+  mutate(woody_cat = cut_width(wriTCFrac, 0.2, boundary = 0)) %>%
 ggplot(aes(x = precipitation, y = GPP)) +
-  geom_point(size = 0.2, alpha = 0.2) +
-  facet_wrap(~grass_cat) +
+  geom_point(size = 0.1, alpha = 0.05) +
+  facet_wrap(~woody_cat) +
   theme_bw() +
   xlim(0, 1200) +
-  ylim(0, 6000)
+  ylim(0, 6000) +
+  labs(title = "GPP vs precipitation by tree cover fraction")
 
-# Histogram of woody cover
-
-sample_points_woody %>%
-  group_by(id) %>%
-  summarise(map = mean(precipitation),
-            woody = mean(woody)) %>%
-  ggplot(aes(x = woody)) +
-  geom_histogram(fill = "palegreen", colour = "darkgreen", bins = 50) +
-  theme_bw()
 
 
 ```
@@ -163,11 +154,10 @@ enough variability in nodes to allow assessment of quantiles.
 
 # Create task
 
-cols_to_retain <- c(
+vars_to_retain <- c(
   "id",
   "year",
   "GPP",
-  "wriTCFrac",
   "mean_ppt",
   "ppt_anomaly",
   "meanPptDay_anomaly",
@@ -180,12 +170,13 @@ cols_to_retain <- c(
   "tMean",
   "parMean",
   "potentialET",
-  "sand"
+  "sand",
+  "wriTCFrac"
 )
 
 sample_points_subset <- sample_points_derived %>%
   drop_na() %>%
-  select(all_of(cols_to_retain))
+  select(all_of(vars_to_retain))
 
 task_gpp <- as_task_regr_st(
   x = sample_points_subset,
@@ -434,7 +425,7 @@ rf_predictions_spt %>%
   geom_point(size = 0.1, alpha = 0.1) +
   geom_abline(intercept = 0, slope = 1, colour = "red") +
   theme_classic() +
-  labs(title = "With spatial CV")
+  labs(title = "With spatiotemporal CV")
 
 rf_predictions_nspt %>%
   ggplot(aes(x = response, y = truth)) +
