@@ -74,18 +74,22 @@ Calculate RESTREND on all pixels
 
 rue <- gpp / precipitation
 
+rue_mean <- mean(rue, na.rm = TRUE)
+
+writeRaster(rue_mean, here("data", "processed", "raster", "rue_mean.tif"))
+
 # Calculate rain use efficiency trend
 tic()
 rue_trend <- app(rue, function(ts) {
   if (any(is.na(ts))) {
     rep(NA, 3)
   } else {
-    df <- tibble(year = seq_len(length(ts)), ts = ts)
-    mod <- RobustLinearReg::theil_sen_regression(ts ~ year, data = df)
+    year <- seq_len(length(ts))
+    mod <- RobustLinearReg::theil_sen_regression(ts ~ year)
     
     slope <- coef(mod)[2]
-    r_sq <- broom::glance(mod)$r.squared[1]
-    p_value <- broom::tidy(mod)$p.value[2]
+    r_sq <- summary(mod)$r.squared
+    p_value <- summary(mod)$coefficients[2,4]
     
     c(slope, r_sq, p_value)
   }
@@ -122,8 +126,8 @@ fit_restrend <- function(gpp_rast, ppt_rast) {
     yint <- coef(model)[1]
     slope <- coef(model)[2]
 
-    r_sq <- broom::glance(model)$r.squared
-    p_value <- broom::tidy(model)$p.value[2]
+    r_sq <- summary(model)$r.squared
+    p_value <- summary(model)$coefficients[2,4]
 
     resids <- residuals(model)
     
@@ -173,8 +177,8 @@ restrend_results <- app(restrend_rast, function(x) {
     mod <- RobustLinearReg::theil_sen_regression(resids ~ year, data = df)
     
     resid_slope <- coef(mod)[2]
-    resid_r_sq <- broom::glance(mod)$r.squared[1]
-    resid_p_value <- broom::tidy(mod)$p.value[2]
+    resid_r_sq <- summary(mod)$r.squared
+    resid_p_value <- summary(mod)$coefficients[2,4]
     
     results <- c(resid_slope, resid_r_sq, resid_p_value)
   }
@@ -193,7 +197,61 @@ writeRaster(restrend_results, here("data", "processed", "raster", "restrend_resu
 
 ```{r restrend_viz}
 
+# RUE
+rue_mean <- rast(here("data", "processed", "raster", "rue_mean.tif"))
+rue_trend <- rast(here("data", "processed", "raster", "rue_trend.tif"))
 
+# RESTREND
+restrend_results <- rast(here("data", "processed", "raster", "restrend_results.tif"))
+
+# RPI
+rpi_mean <- rast(here("data", "processed", "raster", "rpi", "rpi_rast_mean.tif"))
+rpi_ts_trend <- rast(here("data", "processed", "raster", "rpi", "rf_rpi_ts_trend_rast.tif"))
+
+# Visualise on interactive tmap
+tmap_mode("view")
+
+tm_shape(rue_mean) +
+  tm_raster(col.scale = tm_scale_continuous(
+    limits = c(1, 8),
+    midpoint = 3,
+    values = "RdBu",
+    outliers.trunc = c(TRUE, TRUE))) +
+  tm_shape(rue_trend$rue_slope) +
+  tm_raster(col.scale = tm_scale_continuous(
+    limits = c(-0.08, 0.08),
+    midpoint = 0,
+    values = "RdBu",
+    outliers.trunc = c(TRUE, TRUE))) +
+  tm_shape(restrend_results$resid_slope) +
+  tm_raster(col.scale = tm_scale_continuous(
+    limits = c(-35, 35),
+    midpoint = 0,
+    values = "RdBu",
+    outliers.trunc = c(TRUE, TRUE)
+  )) +
+  tm_shape(rpi_mean) +
+  tm_raster(col.scale = tm_scale_continuous(
+    limits = c(0.5, 1),
+    midpoint = 0.63,
+    values = "RdBu",
+    outliers.trunc = c(TRUE, TRUE)
+  )) +
+  tm_shape(rpi_ts_trend$slope) +
+  tm_raster(col.scale = tm_scale_continuous(
+    limits = c(-0.012, 0.012),
+    midpoint = 0,
+    values = "RdBu",
+    outliers.trunc = c(TRUE, TRUE)
+  )) +
+  tm_basemap(c("OpenStreetMap", "Esri.WorldImagery"))
+
+```
+
+
+
+
+```{r }
 
 ```
 
