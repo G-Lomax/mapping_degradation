@@ -1,0 +1,199 @@
+---
+title: "RESTREND"
+output: html_notebook
+date: 2023-11-27
+author: "Guy Lomax"
+---
+
+```{r setup}
+
+# Data handling
+library(tidyverse)
+library(sf)
+library(terra)
+library(here)
+
+# Analysis
+library(tictoc)
+
+# Visualisation
+library(tmap)
+
+
+```
+
+
+Read in data layers
+
+```{r load, include = FALSE}
+
+# Country boundaries
+countries <- st_read(here("data", "raw", "vector", "natural_earth",
+                          "ne_110m_admin_0_countries_fixed.shp"))
+
+ke_tz <- countries %>% filter(NAME %in% c("Kenya", "Tanzania"))
+
+# Covariate layers
+
+# Load dynamic covariates as a named list of rasters (one per year)
+dynamic_covariates_paths <- Sys.glob(here("data", "raw", "raster", "covariateMaps",
+                                          "dynamicVars*.tif"))
+
+years <- str_extract(dynamic_covariates_paths, "\\d\\d\\d\\d")
+dynamic_covariates <- map(dynamic_covariates_paths, rast)
+names(dynamic_covariates) <- years
+
+
+```
+
+
+Data preparation
+
+```{r data_prep}
+
+# Simplify dynamic covariates raster to only GPP and precipitation
+precipitation <- map(dynamic_covariates, function(r) r$precipitation) %>%
+  rast()
+gpp <- map(dynamic_covariates, function(r) r$GPP) %>%
+  rast()
+
+names(precipitation) <- paste0("precipitation_", years)
+names(gpp) <- paste0("gpp_", years)
+
+
+
+```
+
+
+
+Calculate RESTREND on all pixels
+
+```{r rue_restrend}
+
+# Calculate simple rain use efficiency
+
+rue <- gpp / precipitation
+
+# Calculate rain use efficiency trend
+tic()
+rue_trend <- app(rue, function(ts) {
+  if (any(is.na(ts))) {
+    rep(NA, 3)
+  } else {
+    df <- tibble(year = seq_len(length(ts)), ts = ts)
+    mod <- RobustLinearReg::theil_sen_regression(ts ~ year, data = df)
+    
+    slope <- coef(mod)[2]
+    r_sq <- broom::glance(mod)$r.squared[1]
+    p_value <- broom::tidy(mod)$p.value[2]
+    
+    c(slope, r_sq, p_value)
+  }
+})
+toc()
+
+names(rue_trend) <- c("rue_slope", "r_sq", "p_value")
+
+writeRaster(rue_trend, here("data", "processed", "raster", "rue_trend.tif"))
+
+# Function to extract model params and residuals from linear models fitted to
+# the time series in each pixel
+
+fit_restrend <- function(gpp_rast, ppt_rast) {
+  
+  # Convert rasters to a single data frame
+  message("Converting to data frames\n")
+
+  gpp_values <- as.data.frame(gpp_rast, cells = TRUE, xy = TRUE)
+  ppt_values <- as.data.frame(ppt_rast, cells = TRUE, xy = FALSE)
+  
+  data_df <- left_join(gpp_values, ppt_values, by = "cell") %>%
+    pivot_longer(cols = starts_with(c("gpp", "precipitation"))) %>%
+    separate_wider_delim(cols = "name", delim = "_", names = c("var", "year")) %>%
+    pivot_wider(id_cols = c(cell, x, y, year), names_from = var, values_from = value)
+  
+  # Apply RESTREND function to each cell in data frame
+  message("Building models and calculating residuals\n")
+  
+  apply_restrend <- function(df) {
+    
+    model <- lm(gpp ~ precipitation, data = df)
+
+    yint <- coef(model)[1]
+    slope <- coef(model)[2]
+
+    r_sq <- broom::glance(model)$r.squared
+    p_value <- broom::tidy(model)$p.value[2]
+
+    resids <- residuals(model)
+    
+    output <- c(yint, slope, r_sq, p_value, resids)
+    
+    if (length(output) == 23) {
+      names(output) <- c("yint", "slope", "rsq", "p_value", paste0("resid_", years))
+    } else {
+      output <- rep(NA, 23)
+      names(output) <- c("yint", "slope", "rsq", "p_value", paste0("resid_", years))
+    }
+    
+    output
+  }
+  
+  restrend_df <- data_df %>%
+    group_by(cell, x, y) %>%
+    nest() %>%
+    mutate(restrend_list = map(data, apply_restrend)) %>%
+    ungroup() %>%
+    select(x,y,restrend_list) %>%
+    unnest_wider(restrend_list)
+  
+  # Convert to raster
+  message("Converting back to raster")
+  restrend_rast <- rast(restrend_df, crs = crs(gpp_rast), extent = ext(gpp_rast))
+}
+
+tictoc::tic()
+restrend_rast <- fit_restrend(gpp, precipitation)
+tictoc::toc()
+writeRaster(restrend_rast, here("data", "processed", "raster", "restrend_resids.tif"))
+
+# Calculate residual trend
+
+restrend_rast <- rast(here("data", "processed", "raster", "restrend_resids.tif"))
+
+tic()
+restrend_results <- app(restrend_rast, function(x) {
+  params <- x[1:4]
+  resids <- x[5:23]
+  
+  if (any(is.na(x))) {
+    results <- rep(NA, 3)
+  } else {
+    df <- tibble(year = seq_len(length(resids)), resids = resids)
+    mod <- RobustLinearReg::theil_sen_regression(resids ~ year, data = df)
+    
+    resid_slope <- coef(mod)[2]
+    resid_r_sq <- broom::glance(mod)$r.squared[1]
+    resid_p_value <- broom::tidy(mod)$p.value[2]
+    
+    results <- c(resid_slope, resid_r_sq, resid_p_value)
+  }
+  
+  c(params, results)
+})
+toc()
+
+names(restrend_results)[5:7] <- c("resid_slope", "resid_rsq", "resid_p_value")
+
+writeRaster(restrend_results, here("data", "processed", "raster", "restrend_results.tif"),
+            overwrite = TRUE)
+
+```
+
+
+```{r restrend_viz}
+
+
+
+```
+
