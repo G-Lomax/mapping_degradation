@@ -277,6 +277,9 @@ names(rpi_rast) <- years
 rpi_rast_mean <- mean(rpi_rast)
 rpi_rast_var <- app(rpi_rast, var, na.rm = T)
 
+writeRaster(rpi_rast_mean,
+            here("data", "processed", "raster", "rpi", "rpi_rast_mean.tif"))
+
 # mean_map <- tm_shape(ke_tz) + tm_fill(col = "grey85") +
 #   tm_shape(rpi_rast_mean) +
 #   tm_raster(col.scale = tm_scale_continuous(
