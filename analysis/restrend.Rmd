@@ -19,7 +19,6 @@ library(tictoc)
 # Visualisation
 library(tmap)
 
-
 ```
 
 
@@ -42,6 +41,10 @@ dynamic_covariates_paths <- Sys.glob(here("data", "raw", "raster", "covariateMap
 years <- str_extract(dynamic_covariates_paths, "\\d\\d\\d\\d")
 dynamic_covariates <- map(dynamic_covariates_paths, rast)
 names(dynamic_covariates) <- years
+
+# Covariates and RPI for sample points
+
+sample_points_rpi <- read_csv(here("data", "processed", "csv", "sample_points_rpi.csv"))
 
 
 ```
@@ -68,7 +71,7 @@ names(gpp) <- paste0("gpp_", years)
 
 Calculate RESTREND on all pixels
 
-```{r rue_restrend}
+```{r rue_restrend, eval = FALSE}
 
 # Calculate simple rain use efficiency
 
@@ -251,7 +254,64 @@ tm_shape(rue_mean) +
 
 
 
-```{r }
+```{r restrend_df}
+
+# Helper functions for data processing
+fit_restrend <- function(df) {
+  lm(GPP ~ precipitation + tMean, data = df)
+}
+
+rpi_slope <- function(df) {
+  RobustLinearReg::theil_sen_regression(rpi ~ year, data = df)
+}
+
+rue_slope <- function(df) {
+  RobustLinearReg::theil_sen_regression(rue ~ year, data = df)
+}
+
+restrend_slope <- function(df) {
+  RobustLinearReg::theil_sen_regression(.resid ~ year, data = df)
+}
+
+extract_slope <- function(model) {coef(model)[2]}
+# extract_p_value <- function(model) {broom::tidy(model)[2,5]}
+
+# Calculate RUE for each year
+sample_points_rue <- sample_points_rpi %>%
+  mutate(rue = GPP / precipitation)
+
+sample_points_restrend <- sample_points_rue %>%
+  group_by(id, geometry) %>%
+  nest() %>%
+  mutate(
+    # RPI models
+    rpi_mean = map(data, function(df) {mean(df$rpi)})%>% unlist(),
+    rpi_mod = map(data, rpi_slope),
+    rpi_slope = map(rpi_mod, extract_slope)%>% unlist(),
+    # rpi_p_value = map(rpi_mod, extract_p_value),
+    
+    # RUE mean and trend
+    rue_mean = map(data, function(df) {mean(df$rue)})%>% unlist(),
+    rue_mod = map(data, rue_slope),
+    rue_slope = map(rue_mod, extract_slope)%>% unlist(),
+    # rue_p_value = map(rue_mod, extract_p_value),
+    
+    # RESTREND models
+    gpp_mod = map(data, fit_restrend),
+    restrend_r_sq = map(gpp_mod, function(mod) {summary(mod)$r.squared}) %>% unlist(),
+    data = map2(gpp_mod, data, broom::augment),
+    resid_mod = map(data, restrend_slope),
+    restrend_slope = map(resid_mod, extract_slope) %>% unlist()
+    # restrend_p_value = map(resid_mod, extract_p_value)
+  ) %>% select(-data, -ends_with("mod"))
+
+head(sample_points_restrend)
+
+ggplot(sample_points_restrend_clean, aes(x = rpi_slope, y = rue_slope)) +
+  geom_point(size = 0.2, alpha = 0.2) +
+  geom_smooth(method = "lm", colour = "red") +
+  theme_bw()
+
 
 ```
 
