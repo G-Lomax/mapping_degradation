@@ -28,7 +28,7 @@ library(tictoc)
 library(tmap)
 
 # Parallelisation
-nc <- availableCores() - 8
+nc <- (availableCores() - 8) / 4
 plan(multisession, workers = nc)
 
 ```
@@ -55,9 +55,9 @@ sample_points_ppt <- st_read(here("data", "raw", "vector", "coarse",
 
 ppt_distribution <- st_read(here("data", "raw", "vector", "coarse",
                                  "pptDistributionSample.geojson")) %>%
-    dplyr::select(-c("allRangelands", "grassland", "igbp", "shrubland", "trees", "geometry")) %>%
+    dplyr::select(-c("id", "allRangelands", "grassland", "igbp", "shrubland", "trees", "geometry")) %>%
     st_drop_geometry() %>%
-    pivot_longer(cols = !id, names_to = "colname", values_to = "value") %>%
+    pivot_longer(cols = !index, names_to = "colname", values_to = "value") %>%
     separate_wider_delim(colname, "_", names = c("variable", "year")) %>%
     mutate(year = as.numeric(year)) %>%
     pivot_wider(names_from = "variable", values_from = "value")
@@ -76,19 +76,19 @@ sample_points <- sample_points_raw %>%
          y = st_coordinates(geometry)[,2]) %>%
   bind_cols(twi) %>%
   rename(twi = hydrosheds_twi_fd8) %>%
-  select(-allRangelands, -igbp, -shrubland, -grassland, -trees, -ID) %>%
+  select(-allRangelands, -igbp, -shrubland, -grassland, -trees, -ID, -id) %>%
   pivot_longer(cols = starts_with(yearly_vars),
-               names_to = "index", values_to = "value") %>%
-  separate_wider_delim(index, "_", names = c("data", "year")) %>%
+               names_to = "var", values_to = "value") %>%
+  separate_wider_delim(var, "_", names = c("data", "year")) %>%
   pivot_wider(names_from = data, values_from = value) %>%
   mutate(year = as.numeric(year)) %>%
-  left_join(ppt_distribution, by = c("id", "year")) %>%
+  left_join(ppt_distribution, by = c("index", "year")) %>%
   filter(GPP > 0) %>%
   st_as_sf(coords = c("x", "y"), crs = 4326)
 
 # Calculate derived and normalised variables
 sample_points_derived <- sample_points %>%
-  group_by(id) %>%
+  group_by(index) %>%
   mutate(mean_ppt = mean(precipitation),
          ppt_anomaly = precipitation / mean_ppt,
          mean_meanPptDay = mean(meanPptDay),
@@ -155,9 +155,10 @@ enough variability in nodes to allow assessment of quantiles.
 # Create task
 
 vars_to_retain <- c(
-  "id",
+  "index",
   "year",
   "GPP",
+  "precipitation",
   "mean_ppt",
   "ppt_anomaly",
   "meanPptDay_anomaly",
@@ -186,7 +187,7 @@ task_gpp <- as_task_regr_st(
   crs = "epsg:4326"
 )
 
-task_gpp$set_col_roles("id", roles = "space")
+task_gpp$set_col_roles("index", roles = "space")
 task_gpp$set_col_roles("year", roles = "time")
 
 # Create learner (ranger random forest) with initial tuning values
@@ -199,7 +200,7 @@ lrn_ranger_untuned <- lrn("regr.ranger",
                           sample.fraction = 0.5
 )
 
-set_threads(lrn_ranger_untuned, 1)
+set_threads(lrn_ranger_untuned, 4)
 
 # Create resampling strategy
 
@@ -361,7 +362,7 @@ at_nspt <- auto_tuner(
 ```
 
 
-```{r rf_tuning}
+```{r rf_tuning, eval = FALSE}
 # Spatial model
 
 set.seed(789)
@@ -487,6 +488,9 @@ using the model tuned with LLTO-CV.
 sample_points_rpi <- data_with_quantiles_spt %>%
   mutate(rpi = GPP / quantile_pred) %>%
   bind_cols(sample_points_derived %>% select(id, year, geometry, precipitation))
+
+write_csv(sample_points_rpi,
+          here("data", "processed", "csv", "sample_points_rpi.csv"))
 
 ggplot(sample_points_rpi, aes(x = as.factor(year), y = rpi)) +
   geom_boxplot(outlier.size = 0.1, outlier.alpha = 0.3) +
