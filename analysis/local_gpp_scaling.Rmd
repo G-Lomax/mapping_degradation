@@ -1,0 +1,142 @@
+---
+title: "Local GPP Scaling"
+output: html_notebook
+date: 2024-01-09
+author: "Guy Lomax"
+---
+
+This notebook implements a clustering algorithm using input geospatial layers
+to define similar "land capability classes" as defined by Prince et al. (XXXX)
+and developed by Noojipady et al. (XXXX) and Li et al. (XXXX). 
+
+``` {r setup}
+
+# Data handling
+library(tidyverse)
+library(sf)
+library(here)
+
+# Analysis
+library(mlr3verse)
+library(cluster)
+library(future)
+library(tictoc)
+
+# Visualisation
+library(tmap)
+
+```
+
+
+```{r load}
+
+# Country boundaries
+ke_tz <- st_read(here("data", "raw", "vector", "kenya_tanzania.geojson"))
+
+# Sample point data
+sample_points_raw <- st_read(here("data", "raw", "vector", "coarseScaleSample.geojson"))
+
+twi <- read_csv(here("data", "processed", "csv", "twi_sample.csv"))
+
+# Precipitation distribution metrics
+
+ppt_distribution <- st_read(here("data", "raw", "vector", "pptDistributionSample.geojson")) %>%
+    dplyr::select(-c("id", "allRangelands", "grassland", "igbp", "shrubland", "trees", "geometry")) %>%
+    st_drop_geometry() %>%
+    pivot_longer(cols = !index, names_to = "colname", values_to = "value") %>%
+    separate_wider_delim(colname, "_", names = c("variable", "year")) %>%
+    mutate(year = as.numeric(year)) %>%
+    pivot_wider(names_from = "variable", values_from = "value")
+
+```
+
+``` {r clean}
+
+yearly_vars <- c("GPP", "precipitation", "tMean", "parMean", "potentialET")
+static_vars <- c("sand", "slope", "twi", "wriTCFrac")
+
+sample_points_clean <- sample_points_raw %>%
+  mutate(x = st_coordinates(geometry)[,1],
+         y = st_coordinates(geometry)[,2]) %>%
+  bind_cols(twi) %>%
+  rename(twi = hydrosheds_twi_fd8) %>%
+  select(-allRangelands, -igbp, -shrubland, -grassland, -trees, -ID, -id) %>%
+  pivot_longer(cols = starts_with(yearly_vars),
+               names_to = "var", values_to = "value") %>%
+  separate_wider_delim(var, "_", names = c("data", "year")) %>%
+  pivot_wider(names_from = data, values_from = value) %>%
+  mutate(year = as.numeric(year)) %>%
+  select(x, y, index, year, all_of(yearly_vars), all_of(static_vars))
+
+sample_points_mean <- sample_points_clean %>%
+  group_by(index) %>%
+  summarise(across(-year, .fns = \(x) mean(x, na.rm = TRUE))) %>%
+  ungroup()
+
+```
+
+
+``` {r prep}
+
+# Set up mlr3 tasks
+tsk_lgs_sp <- sample_points_mean %>%
+  select(-index) %>%
+  as_task_clust()
+  
+tsk_lgs_nsp <- sample_points_mean %>%
+  select(-x, -y, -index) %>%
+  as_task_clust()
+
+# Set up learners
+lrn_k_sp <- lrn("clust.kmeans", predict_type = "partition", centers = 100)
+lrn_k_nsp <- lrn("clust.kmeans", predict_type = "partition", centers = 100)
+
+lrn_h_sp <- lrn("clust.hclust", predict_type = "partition")
+lrn_h_nsp <- lrn("clust.hclust", predict_type = "partition")
+
+set_threads(lrn_k_sp, n = nc)
+set_threads(lrn_k_nsp, n = nc)
+set_threads(lrn_h_sp, n = nc)
+set_threads(lrn_h_nsp, n = nc)
+
+# Preprocessing pipelines
+
+po_scale <- po("scale")
+
+ppl_k_sp <- as_learner(po_scale %>>% lrn_k_sp)
+ppl_k_nsp <- as_learner(po_scale %>>% lrn_k_nsp)
+
+ppl_h_sp <- as_learner(po_scale %>>% lrn_h_sp)
+ppl_h_nsp <- as_learner(po_scale %>>% lrn_h_nsp)
+
+
+```
+
+
+``` {r train}
+
+ppl_k_sp$train(tsk_lgs_sp)
+ppl_k_nsp$train(tsk_lgs_nsp)
+ppl_h_sp$train(tsk_lgs_sp)
+ppl_h_nsp$train(tsk_lgs_sp)
+
+data_with_preds <- sample_points_mean %>%
+  mutate(group_k_sp = prediction_k_sp$partition,
+         group_k_nsp = prediction_k_nsp$partition,
+         group_h_sp = prediction_h_sp$partition,
+         group_h_nsp = prediction_h_nsp$partition)
+
+ggplot(data_with_preds, aes(x = x, y = y, colour = group_h_sp)) +
+  geom_point() +
+  theme_bw() +
+  scale_colour_distiller(palette = "Accent")
+ggplot(data_with_preds, aes(x = x, y = y, colour = group_h_nsp)) +
+  geom_point() +
+  theme_bw() +
+  scale_colour_distiller(palette = "Accent")
+
+# table(data_with_preds$group_sp)
+
+
+
+```
