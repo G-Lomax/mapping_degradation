@@ -3,12 +3,14 @@ title: "Quantile Regression of Rangeland Productivity - Quantile Regression Fore
 output: html_notebook
 author: Guy Lomax
 date: 2023-06-19
+editor_options: 
+  markdown: 
+    wrap: 72
 ---
 
-This Notebook conducts quantile regression on rangeland productivity data
-using Quantile Regression Forests (QRF), modelling annual gross primary
-productivity (GPP) as a function of environmental variables
-
+This Notebook conducts quantile regression on rangeland productivity
+data using Quantile Regression Forests (QRF), modelling annual gross
+primary productivity (GPP) as a function of environmental variables
 
 ```{r setup, include = FALSE}
 
@@ -28,33 +30,26 @@ library(tictoc)
 library(tmap)
 
 # Parallelisation
-nc <- (availableCores() - 8) / 4
+nc <- (availableCores() - 8) / 2
 plan(multisession, workers = nc)
 
 ```
 
-
 ```{r load, include = FALSE}
 
 # Country boundaries
-countries <- st_read(here("data", "raw", "vector", "natural_earth",
-                          "ne_110m_admin_0_countries_fixed.shp"))
-
-ke_tz <- countries %>% filter(NAME %in% c("Kenya", "Tanzania"))
+ke_tz <- st_read(here("data", "raw", "vector", "kenya_tanzania.geojson"))
 
 # Sample point data
-sample_points_raw <- st_read(here("data", "raw", "vector", "coarse",
-                                  "coarseScaleSample.geojson"))
+sample_points_raw <- st_read(here("data", "raw", "vector", "coarseScaleSample.geojson"))
 
 twi <- read_csv(here("data", "processed", "csv", "twi_sample.csv"))
 
-sample_points_ppt <- st_read(here("data", "raw", "vector", "coarse",
-                                  "pptDistributionSample.geojson"))
+sample_points_ppt <- st_read(here("data", "raw", "vector", "pptDistributionSample.geojson"))
 
 # Precipitation distribution metrics
 
-ppt_distribution <- st_read(here("data", "raw", "vector", "coarse",
-                                 "pptDistributionSample.geojson")) %>%
+ppt_distribution <- st_read(here("data", "raw", "vector", "pptDistributionSample.geojson")) %>%
     dplyr::select(-c("id", "allRangelands", "grassland", "igbp", "shrubland", "trees", "geometry")) %>%
     st_drop_geometry() %>%
     pivot_longer(cols = !index, names_to = "colname", values_to = "value") %>%
@@ -64,7 +59,6 @@ ppt_distribution <- st_read(here("data", "raw", "vector", "coarse",
 
 
 ```
-
 
 ```{r clean, include = FALSE}
 
@@ -97,7 +91,6 @@ sample_points_derived <- sample_points %>%
 
 ```
 
-
 # Exploratory data analysis
 
 ```{r eda}
@@ -116,7 +109,7 @@ ggplot(sample_points_derived, aes(x = wriTCFrac)) +
 # GPP-PPT relationship for different fractions of grassland/shrubland
 
 sample_points_derived %>%
-  mutate(woody_cat = cut_width(wriTCFrac, 0.2, boundary = 0)) %>%
+  mutate(woody_cat = cut_width(wriTCFrac, 20, boundary = 0)) %>%
 ggplot(aes(x = precipitation, y = GPP)) +
   geom_point(size = 0.1, alpha = 0.05) +
   facet_wrap(~woody_cat) +
@@ -131,24 +124,25 @@ ggplot(aes(x = precipitation, y = GPP)) +
 
 # Data preparation for RF modelling
 
-We select variables to use for modelling, remove rows containing NA values
-(the TWI raster has some pixels with NA values) and convert to a spatiotemporal
-regression task. We assign point id ("id") as our index of spatial location and
-"year" as our index of time.
+We select variables to use for modelling, remove rows containing NA
+values (the TWI raster has some pixels with NA values) and convert to a
+spatiotemporal regression task. We assign point id ("id") as our index
+of spatial location and "year" as our index of time.
 
-We then choose our learner (random forest regression through the ranger package)
-with quantile regression enabled, and define two alternative resampling (cross-
-validation) strategies: random CV and "Leave-location-and-time-out" CV that
-ensures the validation set for each fold does not overlap in either time or space
-with the training set.
+We then choose our learner (random forest regression through the ranger
+package) with quantile regression enabled, and define two alternative
+resampling (cross- validation) strategies: random CV and
+"Leave-location-and-time-out" CV that ensures the validation set for
+each fold does not overlap in either time or space with the training
+set.
 
-When defining the learner, we initially choose crude, plausible hyperparameters
-of mtry.ratio = 0.5 and sample.fraction = 0.5. However, we set the initial
-minimum node size to 200 (around 0.1% of the dataset) to mitigate overfitting
-and to allow sufficient terminal node size that quantiles can be calculated. For
-our purposes, absolute predictive accuracy is less important than retaining
-enough variability in nodes to allow assessment of quantiles.
-
+When defining the learner, we initially choose crude, plausible
+hyperparameters of mtry.ratio = 0.5 and sample.fraction = 0.5. However,
+we set the initial minimum node size to 200 (around 0.1% of the dataset)
+to mitigate overfitting and to allow sufficient terminal node size that
+quantiles can be calculated. For our purposes, absolute predictive
+accuracy is less important than retaining enough variability in nodes to
+allow assessment of quantiles.
 
 ```{r data_prep}
 
@@ -208,18 +202,19 @@ spt_cv_plan <- rsmp("sptcv_cstf", folds = 10)
 nspt_cv_plan <- rsmp("cv", folds = 10)
 
 ```
+
 # Feature selection
 
-We use forward feature selection with the untuned model to identify which
-covariates have unique information to predict GPP. For this, we start by
-building all possible single-variable models. Then, selecting the variable that
-gives the best performance (lowest RMSE in this case), we build all possible
-two-variable models that include this variable. We do the same with a third
-variable, and so on, until the point at which adding an additional variable
-fails to improve model performance.
+We use forward feature selection with the untuned model to identify
+which covariates have unique information to predict GPP. For this, we
+start by building all possible single-variable models. Then, selecting
+the variable that gives the best performance (lowest RMSE in this case),
+we build all possible two-variable models that include this variable. We
+do the same with a third variable, and so on, until the point at which
+adding an additional variable fails to improve model performance.
 
-We do this separately for models using random CV and spatio-temporal CV, and
-save the optimum feature set for each.
+We do this separately for models using random CV and spatio-temporal CV,
+and save the optimum feature set for each.
 
 ```{r rf_feature_select, message = FALSE, results = FALSE, include = FALSE}
 
@@ -247,50 +242,51 @@ nspt_feature_select <- fsi(
   terminator = fs_term
 )
 
-# Identify optimal feature set for each resampling strategy and store
-# Time ~ 10-12 hours
-
-set.seed(123)
-
-tic()
-progressr::with_progress(
-  spt_feature_set <- fs_method$optimize(spt_feature_select)
-)
-toc()
-# beep(3)
-
-write_rds(spt_feature_select, here("results", "rds", "spt_feature_selector.rds"))
-write_rds(spt_feature_set, here("results", "rds", "spt_features.rds"))
-rm(spt_feature_select, spt_feature_set)
-gc()
-
-set.seed(456)
-tic()
-progressr::with_progress(
-  nspt_feature_set <- fs_method$optimize(nspt_feature_select)
-)
-toc()
-# beep(3)
-
-write_rds(nspt_feature_select, here("results", "rds", "nspt_feature_selector.rds"))
-write_rds(nspt_feature_set, here("results", "rds", "nspt_features.rds"))
-rm(nspt_feature_set)
-gc()
+# # Identify optimal feature set for each resampling strategy and store
+# # Time ~ 10-12 hours
+# 
+# set.seed(123)
+# 
+# tic()
+# progressr::with_progress(
+#   spt_feature_set <- fs_method$optimize(spt_feature_select)
+# )
+# toc()
+# # beep(3)
+# 
+# write_rds(spt_feature_select, here("results", "rds", "spt_feature_selector.rds"))
+# write_rds(spt_feature_set, here("results", "rds", "spt_features.rds"))
+# rm(spt_feature_select, spt_feature_set)
+# gc()
+# 
+# set.seed(456)
+# tic()
+# progressr::with_progress(
+#   nspt_feature_set <- fs_method$optimize(nspt_feature_select)
+# )
+# toc()
+# # beep(3)
+# 
+# write_rds(nspt_feature_select, here("results", "rds", "nspt_feature_selector.rds"))
+# write_rds(nspt_feature_set, here("results", "rds", "nspt_features.rds"))
+# rm(nspt_feature_set)
+# gc()
 
 
 ```
 
 # Hyper-parameter optimisation (model tuning)
 
-Now we have identified relevant features (and, hopefully, excluded those with
-minimal predictive power), we can use that feature set to tune hyperparameters
-for a new set of models.
+Now we have identified relevant features (and, hopefully, excluded those
+with minimal predictive power), we can use that feature set to tune
+hyperparameters for a new set of models.
 
-We create two new tasks, each with the variables selected from the previous
-step. Then we define a new learner allowing for tuning of hyperparameters.
-Finally, we pass the learner and task to an auto-tuner object for each of the
-two CV methods. We use a random search to identify hyperparameters that give
-decent performance; we are not worried about perfection!
+We create two new tasks, each with the variables selected from the
+previous step. Then we define a new learner allowing for tuning of
+hyperparameters. Finally, we pass the learner and task to an auto-tuner
+object for each of the two CV methods. We use a random search to
+identify hyperparameters that give decent performance; we are not
+worried about perfection!
 
 ```{r rf_tuning_prep, include = FALSE}
 
@@ -334,8 +330,8 @@ lrn_ranger_tuned_nspt <- lrn(
   sample.fraction = to_tune(p_dbl(0.1, 0.9))
 )
 
-set_threads(lrn_ranger_tuned_spt, 4)
-set_threads(lrn_ranger_tuned_nspt, 4)
+set_threads(lrn_ranger_tuned_spt, 2)
+set_threads(lrn_ranger_tuned_nspt, 2)
 
 # Define auto-tuner objects for each model
 
@@ -360,7 +356,6 @@ at_nspt <- auto_tuner(
 )
 
 ```
-
 
 ```{r rf_tuning, eval = FALSE}
 # Spatial model
@@ -396,8 +391,8 @@ rm(rf_tuned_nspt)
 gc()
 
 
-```
 
+```
 
 Performance assessment of spatial and non-spatial models
 
@@ -470,18 +465,58 @@ ggplot(data_with_quantiles_nspt, aes(x = quantile_pred, y = GPP)) +
        title = "Predicted vs actual GPP (g C m-2 yr-1)",
        subtitle = "Trained with random CV")
 
+plot_theme <- theme(
+    panel.background = element_rect(fill='transparent'), #transparent panel bg
+    plot.background = element_rect(fill='transparent', color=NA), #transparent plot bg
+    panel.grid.major = element_blank(), #remove major gridlines
+    panel.grid.minor = element_blank(), #remove minor gridlines
+    legend.background = element_rect(fill='transparent'), #transparent legend bg
+    legend.box.background = element_rect(fill='transparent'), #transparent legend panel
+    axis.title = element_text(size = 22),
+    axis.text = element_text(size = 22),
+    axis.ticks = element_line(linewidth = 1.2),
+    axis.line = element_line(linewidth = 1.2),
+    aspect.ratio = 2/3
+  )
+
+pred_vs_actual_mean <- ggplot(rf_predictions_spt, aes(x = response, y = truth)) +
+  geom_point(size = 0.1, alpha = 0.1, colour = "#2D4443") +
+  geom_smooth(method = "gam", colour = "#ED7A2C") +
+  geom_abline(intercept = 0, slope = 1, colour = "red") +
+  xlim(0,6000) + ylim(0,6000) +
+  theme_classic() +
+  labs(x = expression(Predicted~GPP~(g~C~m^-2~yr^-1)),
+       y = expression(Actual~GPP~(g~C~m^-2~yr^-1)))
+
+set.seed(333)
+pred_vs_actual_qu <- ggplot(data_with_quantiles_spt %>% sample_frac(0.1), aes(x = quantile_pred, y = GPP)) +
+  # geom_point(size = 0.4, alpha = 0.4, colour = "#2D4443") +
+  geom_abline(slope = seq(0.2, 1, 0.2), intercept = 0, colour = "#ED7A2C", lwd = 0.6, linetype = "longdash") +
+  # geom_abline(slope = 1, intercept = 0, colour = "#ED7A2C", lwd = 1.2) +
+  theme_classic() +
+  xlim(0,7000) + ylim(0,7000) +
+  labs(x = "Predicted baseline GPP\n(0.9 quantile)",
+       y = expression(Actual~GPP~(g~C~m^-2~yr^-1))) +
+  plot_theme
+
+pred_vs_actual_qu
+
+
+ggsave(here("results", "figures", "fitted_vs_actual_qu_rf_rpi_2.png"),
+       pred_vs_actual_qu,
+       width = 36, height = 24, units = "cm", dpi = 200)
 
 ```
 
-It worked! I built two models that predict the 90th percentile with some degree
-of skill, and allow calculation of RPI.
+It worked! I built two models that predict the 90th percentile with some
+degree of skill, and allow calculation of RPI.
 
-Both models have similar performance, perhaps because I constrained them to
-retain a minimum of 200 points in each node to minimise overfitting. I need to
-check whether this works!
+Both models have similar performance, perhaps because I constrained them
+to retain a minimum of 200 points in each node to minimise overfitting.
+I need to check whether this works!
 
-Add predictions to task data table and calculate RPI for the sample dataset
-using the model tuned with LLTO-CV.
+Add predictions to task data table and calculate RPI for the sample
+dataset using the model tuned with LLTO-CV.
 
 ```{r rpi}
 
@@ -542,21 +577,20 @@ tm_shape(ke_tz) + tm_borders() +
   tm_dots(col = "mean_rpi", palette = "PiYG", style = "cont", midpoint = 0.8)
 ```
 
-Observations:
-- Some annual variations remain in the boxplots, which implies that we haven't
-yet removed all impact of climate on the model.
-- There remains a weak positive correlation between mean_ppt and RPI, which may
-reflect the tighter grouping (fewer very low values) at high mean PPT.
-Perhaps this reflects greater resistance/less influence of dry years or land use
-at higher ppt?
-- There remains a line of points with fitted RPI exactly 1, but this is only ~1%
-of the dataset. I think it's just a function of how RF models work.
-- Strangely there remains a slight bias in the quantile regression. Around 93%
-of sample points have an RPI < 1; if the regression were perfect, this should
-be almost exactly 90%. This applies across the whole range of precipitation
+Observations: - Some annual variations remain in the boxplots, which
+implies that we haven't yet removed all impact of climate on the
+model. - There remains a weak positive correlation between mean_ppt and
+RPI, which may reflect the tighter grouping (fewer very low values) at
+high mean PPT. Perhaps this reflects greater resistance/less influence
+of dry years or land use at higher ppt? - There remains a line of points
+with fitted RPI exactly 1, but this is only \~1% of the dataset. I think
+it's just a function of how RF models work. - Strangely there remains a
+slight bias in the quantile regression. Around 93% of sample points have
+an RPI \< 1; if the regression were perfect, this should be almost
+exactly 90%. This applies across the whole range of precipitation
 values, too.
 
-``` {r example}
+```{r example}
 
 pixel_ids_df <- sample_points_rpi %>%
   filter(wriTCFrac < 0.05) %>%
@@ -613,9 +647,6 @@ ggplot(rpi_sample, aes(x = year, y = rpi)) +
 #        width = 16, height = 12, units = "cm")
 
 ```
-
-
-
 
 ```{r autocorrelation_and_trends}
 
@@ -680,9 +711,3 @@ tm_shape(rpi_trends_metrics %>% st_as_sf(crs = 4326)) + tm_dots(col = "theilsen_
 
 
 ```
-
-
-
-
-
-

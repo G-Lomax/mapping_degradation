@@ -42,18 +42,13 @@ tmap_options(check.and.fix = TRUE)
 
 ```{r load, include = FALSE}
 
-countries <- st_read(here("data", "raw", "vector", "natural_earth",
-                          "ne_110m_admin_0_countries_fixed.shp"))
+ke_tz <- st_read(here("data", "raw", "vector", "kenya_tanzania.geojson"))
 
-ke_tz <- countries %>% filter(NAME %in% c("Kenya", "Tanzania"))
-
-sample_points_raw <- st_read(here("data", "raw", "vector", "coarse",
-                                  "coarseScaleSample.geojson"))
+sample_points_raw <- st_read(here("data", "raw", "vector", "coarseScaleSample.geojson"))
 
 twi <- read_csv(here("data", "processed", "csv", "twi_sample.csv"))
 
-ecoregions <- st_read(here("data", "raw", "vector", "coarse", "Ecoregions2017",
-                                  "Ecoregions2017.shp"))
+ecoregions <- st_read(here("data", "raw", "vector", "Ecoregions2017", "Ecoregions2017.shp"))
 
 rangeland_ecoregions <- filter(ecoregions, ECO_ID %in% c(50, 51, 55, 57)) %>%
   mutate(ECO_NAME = str_replace(ECO_NAME, "Commiphora ", "Commiphora\n"))

@@ -19,6 +19,7 @@ library(tictoc)
 # Visualisation
 library(tmap)
 
+
 ```
 
 
@@ -27,10 +28,7 @@ Read in data layers
 ```{r load, include = FALSE}
 
 # Country boundaries
-countries <- st_read(here("data", "raw", "vector", "natural_earth",
-                          "ne_110m_admin_0_countries_fixed.shp"))
-
-ke_tz <- countries %>% filter(NAME %in% c("Kenya", "Tanzania"))
+ke_tz <- st_read(here("data", "raw", "vector", "kenya_tanzania.geojson"))
 
 # Covariate layers
 
@@ -41,10 +39,6 @@ dynamic_covariates_paths <- Sys.glob(here("data", "raw", "raster", "covariateMap
 years <- str_extract(dynamic_covariates_paths, "\\d\\d\\d\\d")
 dynamic_covariates <- map(dynamic_covariates_paths, rast)
 names(dynamic_covariates) <- years
-
-# Covariates and RPI for sample points
-
-sample_points_rpi <- read_csv(here("data", "processed", "csv", "sample_points_rpi.csv"))
 
 
 ```
@@ -71,15 +65,11 @@ names(gpp) <- paste0("gpp_", years)
 
 Calculate RESTREND on all pixels
 
-```{r rue_restrend, eval = FALSE}
+```{r rue_restrend}
 
 # Calculate simple rain use efficiency
 
 rue <- gpp / precipitation
-
-rue_mean <- mean(rue, na.rm = TRUE)
-
-writeRaster(rue_mean, here("data", "processed", "raster", "rue_mean.tif"))
 
 # Calculate rain use efficiency trend
 tic()
@@ -87,12 +77,12 @@ rue_trend <- app(rue, function(ts) {
   if (any(is.na(ts))) {
     rep(NA, 3)
   } else {
-    year <- seq_len(length(ts))
-    mod <- RobustLinearReg::theil_sen_regression(ts ~ year)
+    df <- tibble(year = seq_len(length(ts)), ts = ts)
+    mod <- RobustLinearReg::theil_sen_regression(ts ~ year, data = df)
     
     slope <- coef(mod)[2]
-    r_sq <- summary(mod)$r.squared
-    p_value <- summary(mod)$coefficients[2,4]
+    r_sq <- broom::glance(mod)$r.squared[1]
+    p_value <- broom::tidy(mod)$p.value[2]
     
     c(slope, r_sq, p_value)
   }
@@ -129,8 +119,8 @@ fit_restrend <- function(gpp_rast, ppt_rast) {
     yint <- coef(model)[1]
     slope <- coef(model)[2]
 
-    r_sq <- summary(model)$r.squared
-    p_value <- summary(model)$coefficients[2,4]
+    r_sq <- broom::glance(model)$r.squared
+    p_value <- broom::tidy(model)$p.value[2]
 
     resids <- residuals(model)
     
@@ -180,8 +170,8 @@ restrend_results <- app(restrend_rast, function(x) {
     mod <- RobustLinearReg::theil_sen_regression(resids ~ year, data = df)
     
     resid_slope <- coef(mod)[2]
-    resid_r_sq <- summary(mod)$r.squared
-    resid_p_value <- summary(mod)$coefficients[2,4]
+    resid_r_sq <- broom::glance(mod)$r.squared[1]
+    resid_p_value <- broom::tidy(mod)$p.value[2]
     
     results <- c(resid_slope, resid_r_sq, resid_p_value)
   }
@@ -200,117 +190,6 @@ writeRaster(restrend_results, here("data", "processed", "raster", "restrend_resu
 
 ```{r restrend_viz}
 
-# RUE
-rue_mean <- rast(here("data", "processed", "raster", "rue_mean.tif"))
-rue_trend <- rast(here("data", "processed", "raster", "rue_trend.tif"))
-
-# RESTREND
-restrend_results <- rast(here("data", "processed", "raster", "restrend_results.tif"))
-
-# RPI
-rpi_mean <- rast(here("data", "processed", "raster", "rpi", "rpi_rast_mean.tif"))
-rpi_ts_trend <- rast(here("data", "processed", "raster", "rpi", "rf_rpi_ts_trend_rast.tif"))
-
-# Visualise on interactive tmap
-tmap_mode("view")
-
-tm_shape(rue_mean) +
-  tm_raster(col.scale = tm_scale_continuous(
-    limits = c(1, 8),
-    midpoint = 3,
-    values = "RdBu",
-    outliers.trunc = c(TRUE, TRUE))) +
-  tm_shape(rue_trend$rue_slope) +
-  tm_raster(col.scale = tm_scale_continuous(
-    limits = c(-0.08, 0.08),
-    midpoint = 0,
-    values = "RdBu",
-    outliers.trunc = c(TRUE, TRUE))) +
-  tm_shape(restrend_results$resid_slope) +
-  tm_raster(col.scale = tm_scale_continuous(
-    limits = c(-35, 35),
-    midpoint = 0,
-    values = "RdBu",
-    outliers.trunc = c(TRUE, TRUE)
-  )) +
-  tm_shape(rpi_mean) +
-  tm_raster(col.scale = tm_scale_continuous(
-    limits = c(0.5, 1),
-    midpoint = 0.63,
-    values = "RdBu",
-    outliers.trunc = c(TRUE, TRUE)
-  )) +
-  tm_shape(rpi_ts_trend$slope) +
-  tm_raster(col.scale = tm_scale_continuous(
-    limits = c(-0.012, 0.012),
-    midpoint = 0,
-    values = "RdBu",
-    outliers.trunc = c(TRUE, TRUE)
-  )) +
-  tm_basemap(c("OpenStreetMap", "Esri.WorldImagery"))
-
-```
-
-
-
-
-```{r restrend_df}
-
-# Helper functions for data processing
-fit_restrend <- function(df) {
-  lm(GPP ~ precipitation + tMean, data = df)
-}
-
-rpi_slope <- function(df) {
-  RobustLinearReg::theil_sen_regression(rpi ~ year, data = df)
-}
-
-rue_slope <- function(df) {
-  RobustLinearReg::theil_sen_regression(rue ~ year, data = df)
-}
-
-restrend_slope <- function(df) {
-  RobustLinearReg::theil_sen_regression(.resid ~ year, data = df)
-}
-
-extract_slope <- function(model) {coef(model)[2]}
-# extract_p_value <- function(model) {broom::tidy(model)[2,5]}
-
-# Calculate RUE for each year
-sample_points_rue <- sample_points_rpi %>%
-  mutate(rue = GPP / precipitation)
-
-sample_points_restrend <- sample_points_rue %>%
-  group_by(id, geometry) %>%
-  nest() %>%
-  mutate(
-    # RPI models
-    rpi_mean = map(data, function(df) {mean(df$rpi)})%>% unlist(),
-    rpi_mod = map(data, rpi_slope),
-    rpi_slope = map(rpi_mod, extract_slope)%>% unlist(),
-    # rpi_p_value = map(rpi_mod, extract_p_value),
-    
-    # RUE mean and trend
-    rue_mean = map(data, function(df) {mean(df$rue)})%>% unlist(),
-    rue_mod = map(data, rue_slope),
-    rue_slope = map(rue_mod, extract_slope)%>% unlist(),
-    # rue_p_value = map(rue_mod, extract_p_value),
-    
-    # RESTREND models
-    gpp_mod = map(data, fit_restrend),
-    restrend_r_sq = map(gpp_mod, function(mod) {summary(mod)$r.squared}) %>% unlist(),
-    data = map2(gpp_mod, data, broom::augment),
-    resid_mod = map(data, restrend_slope),
-    restrend_slope = map(resid_mod, extract_slope) %>% unlist()
-    # restrend_p_value = map(resid_mod, extract_p_value)
-  ) %>% select(-data, -ends_with("mod"))
-
-head(sample_points_restrend)
-
-ggplot(sample_points_restrend_clean, aes(x = rpi_slope, y = rue_slope)) +
-  geom_point(size = 0.2, alpha = 0.2) +
-  geom_smooth(method = "lm", colour = "red") +
-  theme_bw()
 
 
 ```

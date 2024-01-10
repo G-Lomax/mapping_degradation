@@ -45,10 +45,7 @@ plan(multisession, workers = availableCores() - 8)
 ```{r load, include = FALSE}
 
 # Country boundaries
-countries <- st_read(here("data", "raw", "vector", "natural_earth",
-                          "ne_110m_admin_0_countries_fixed.shp"))
-
-ke_tz <- countries %>% filter(NAME %in% c("Kenya", "Tanzania"))
+ke_tz <- st_read(here("data", "raw", "vector", "kenya_tanzania.geojson"))
 
 # Covariate layers
 # Static

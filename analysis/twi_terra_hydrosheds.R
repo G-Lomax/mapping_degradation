@@ -64,32 +64,31 @@ twi_fd8 <- rast(here("data", "processed", "raster", "hydroSHEDS", "hydrosheds_tw
 
 plot(twi_fd8, xlim = c(30, 30.5), ylim = c(-5, -4.5))
 
-# Infinite flow accumulation
-
-wbt_md_inf_flow_accumulation(
-  dem = here("data", "processed", "raster", "hydroSHEDS", "hydroshedsDemReproj.tif"),
-  output = here("data", "processed", "raster", "hydroSHEDS", "hydrosheds_fa_dinf.tif"),
-  out_type = "specific contributing area",
-  threshold = 3000
-)
-
-wbt_wetness_index(
-  sca = here("data", "processed", "raster", "hydroSHEDS", "hydrosheds_fa_dinf.tif"),
-  slope = here("data", "processed", "raster", "hydroSHEDS", "hydroshedsSlopeCorrected.tif"),
-  output = here("data", "processed", "raster", "hydroSHEDS", "hydrosheds_twi_dinf.tif")
-)
-
-twi_dinf <- rast(here("data", "processed", "raster", "hydroSHEDS", "hydrosheds_twi_dinf.tif"))
-
-plot(twi_dinf, xlim = c(30, 30.5), ylim = c(-5, -4.5))
+# # Infinite flow accumulation
+# 
+# wbt_md_inf_flow_accumulation(
+#   dem = here("data", "processed", "raster", "hydroSHEDS", "hydroshedsDemReproj.tif"),
+#   output = here("data", "processed", "raster", "hydroSHEDS", "hydrosheds_fa_dinf.tif"),
+#   out_type = "specific contributing area",
+#   threshold = 3000
+# )
+# 
+# wbt_wetness_index(
+#   sca = here("data", "processed", "raster", "hydroSHEDS", "hydrosheds_fa_dinf.tif"),
+#   slope = here("data", "processed", "raster", "hydroSHEDS", "hydroshedsSlopeCorrected.tif"),
+#   output = here("data", "processed", "raster", "hydroSHEDS", "hydrosheds_twi_dinf.tif")
+# )
+# 
+# twi_dinf <- rast(here("data", "processed", "raster", "hydroSHEDS", "hydrosheds_twi_dinf.tif"))
+# 
+# plot(twi_dinf, xlim = c(30, 30.5), ylim = c(-5, -4.5))
 
 # Extract twi (using Freeman D8 following Kopecky et al. (2021)) at sample point locations
 
 # Reproject to WGS 84 lat/lon
 twi_fd8_wgs84 <- project(twi_fd8, dem)
 
-sample_points_raw <- st_read(here("data", "raw", "vector", "coarse",
-                                  "coarseScaleSample.geojson"))
+sample_points_raw <- st_read(here("data", "raw", "vector", "coarseScaleSample.geojson"))
 
 sample_points_twi <- terra::extract(twi_fd8_wgs84, sample_points_raw)
 head(sample_points_twi)
