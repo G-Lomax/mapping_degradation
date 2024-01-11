@@ -167,14 +167,6 @@ sample_points_clustered <- combined_vars_df %>%
   mutate(k = substring(k, 11) %>% as.numeric())
 toc()
 
-tic()
-extra <- combined_vars_df %>%
-  mutate(clusters_k100 = fit_k_means(tsk_lgs, 100)) %>%
-  pivot_longer(cols = starts_with("clusters"),
-              names_to = "k", values_to = "cluster") %>%
-  mutate(k = substring(k, 11) %>% as.numeric())
-toc()
-
 write_rds(sample_points_clustered, here("data", "processed", "rds", "clusters.rds"))
 
 ```
@@ -239,7 +231,7 @@ medians <- lgs %>%
             median_potential = median(potential))
 
 # Map results
-map_k <- 50
+map_k <- 100
 index <- which(k_list == map_k)
 
 lgs_map <- tm_shape(ke_tz) +
@@ -282,6 +274,10 @@ lgs_potential_map <- tm_shape(ke_tz) +
   tm_shape(ke_tz) +
   tm_borders()
 
+lgs_map
+gpp_map
+lgs_potential_map
+
 
 # tm_shape(ke_tz) +
 #   tm_fill("grey90") +
@@ -292,6 +288,31 @@ lgs_potential_map <- tm_shape(ke_tz) +
 #     ) +
 #   tm_shape(ke_tz) +
 #   tm_borders()
+
+```
+
+The potential GPP as estimated from the cluster analysis varies widely, but
+certain areas (e.g., Eastern Kenya) have large areas with the same estimated
+potential GPP. This gives rise to blocky artifacts and discontinuities in the
+LGS map at the cluster boundaries that are unlikely to reflect reality.
+
+In addition, the results are sensitive to the number of clusters chosen. With
+small k, clusters are very large and result in very blocky maps of potential
+GPP and LGS ratios. For larger k, this problem is reduced, but the range of
+LGS ratios becomes smaller and the method becomes less sensitive.
+
+``` {r save}
+
+# Save LGS rasters to disk for comparison with other results
+
+for (i in seq_along(k_list)) {
+  filename <- paste0("lgs_rast_", k_list[i], ".tif")
+  
+  r <- lgs_rasters[[i]]
+  
+  writeRaster(r, here("data", "processed", "raster", "lgs", filename),
+              overwrite = TRUE)
+}
 
 
 ```
