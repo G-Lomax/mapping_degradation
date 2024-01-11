@@ -9,10 +9,6 @@ This Notebook uses quantile regression models fitted on sample data to map
 the annual relative productivity index across Kenyan and Tanzanian rangelands
 from 2000 to 2018.
 
-TO DO:
-1. Fix input layers to filter only to rangeland pixels
-2. Include % woody layer to allow fitting of correct model
-
 
 ```{r setup, include = FALSE}
 
