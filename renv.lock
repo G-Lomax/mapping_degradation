@@ -168,32 +168,6 @@
       ],
       "Hash": "45f0398006e83a5b10b72a90663d8d8c"
     },
-    "RWeka": {
-      "Package": "RWeka",
-      "Version": "0.4-46",
-      "Source": "Repository",
-      "Repository": "CRAN",
-      "Requirements": [
-        "R",
-        "RWekajars",
-        "graphics",
-        "grid",
-        "rJava",
-        "stats",
-        "utils"
-      ],
-      "Hash": "553665dcdd4ac40dfa85d871d8f6364f"
-    },
-    "RWekajars": {
-      "Package": "RWekajars",
-      "Version": "3.9.3-2",
-      "Source": "Repository",
-      "Repository": "CRAN",
-      "Requirements": [
-        "rJava"
-      ],
-      "Hash": "178a689856a205694dfb0915343f80c3"
-    },
     "Rcpp": {
       "Package": "Rcpp",
       "Version": "1.0.12",
@@ -2714,17 +2688,6 @@
         "survival"
       ],
       "Hash": "1bbc97f7d637ab3917c514a69047b2c1"
-    },
-    "rJava": {
-      "Package": "rJava",
-      "Version": "1.0-10",
-      "Source": "Repository",
-      "Repository": "CRAN",
-      "Requirements": [
-        "R",
-        "methods"
-      ],
-      "Hash": "151b95627c232d3822bb6d876286a99c"
     },
     "ragg": {
       "Package": "ragg",
