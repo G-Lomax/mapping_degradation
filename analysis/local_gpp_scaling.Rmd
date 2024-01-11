@@ -7,19 +7,23 @@ author: "Guy Lomax"
 
 This notebook implements a clustering algorithm using input geospatial layers
 to define similar "land capability classes" as defined by Prince et al. (XXXX)
-and developed by Noojipady et al. (XXXX) and Li et al. (XXXX). 
+and developed by Noojipady et al. (XXXX) and Li et al. (XXXX). These references
+typically use remotely sensed NPP products or use NDVI as a proxy, and hence
+refer to the method as "local NPP scaling" (LNS). Using GPP data, we thus
+apply "local GPP scaling" (LGS) as an alternative.
+
 
 ``` {r setup}
 
 # Data handling
 library(tidyverse)
 library(sf)
+library(terra)
 library(here)
 
 # Analysis
 library(mlr3verse)
-library(cluster)
-library(future)
+library(RWeka)
 library(tictoc)
 
 # Visualisation
@@ -28,115 +32,183 @@ library(tmap)
 ```
 
 
+We define land capability classes (LCCs) based on the multi-annual mean values of
+precipitation, air temperature, photosynthetically active radiation and potential ET,
+as well as % tree cover, soil sand fraction and slope. This is to prevent the instability
+in LCCs that results if new classes are derived for each year in the dataset.
+
+We conduct a range of analyses, using the following subsets of variables:
+- Mean annual precipitation, temperature, sand fraction, tree cover and slope
+- The above variables plus mean PAR and PET
+- The above variables plus mean values of precipitation intensity and timing variables
+
+In addition, we construct land capability classes based on three methods:
+- X-means clustering
+- DBScan clustering???
+- Simple binning of covariates
+
 ```{r load}
 
 # Country boundaries
 ke_tz <- st_read(here("data", "raw", "vector", "kenya_tanzania.geojson"))
 
-# Sample point data
-sample_points_raw <- st_read(here("data", "raw", "vector", "coarseScaleSample.geojson"))
+# Covariate layers
+# Static
+static_covariates <- rast(here("data", "raw", "raster", "covariateMaps",
+                                 "staticVars.tif"))
 
-twi <- read_csv(here("data", "processed", "csv", "twi_sample.csv"))
+twi <- rast(here("data", "processed", "raster", "hydroSHEDS",
+                 "hydrosheds_twi_fd8.tif"))
 
-# Precipitation distribution metrics
+names(twi) <- "twi"
 
-ppt_distribution <- st_read(here("data", "raw", "vector", "pptDistributionSample.geojson")) %>%
-    dplyr::select(-c("id", "allRangelands", "grassland", "igbp", "shrubland", "trees", "geometry")) %>%
-    st_drop_geometry() %>%
-    pivot_longer(cols = !index, names_to = "colname", values_to = "value") %>%
-    separate_wider_delim(colname, "_", names = c("variable", "year")) %>%
-    mutate(year = as.numeric(year)) %>%
-    pivot_wider(names_from = "variable", values_from = "value")
+# Load dynamic covariates as a named list of rasters (one per year)
+dynamic_covariates_paths <- Sys.glob(here("data", "raw", "raster", "covariateMaps",
+                                          "dynamicVars*.tif"))
 
-```
+years <- str_extract(dynamic_covariates_paths, "\\d\\d\\d\\d")
+dynamic_covariates <- map(dynamic_covariates_paths, rast)
+names(dynamic_covariates) <- years
 
-``` {r clean}
-
-yearly_vars <- c("GPP", "precipitation", "tMean", "parMean", "potentialET")
-static_vars <- c("sand", "slope", "twi", "wriTCFrac")
-
-sample_points_clean <- sample_points_raw %>%
-  mutate(x = st_coordinates(geometry)[,1],
-         y = st_coordinates(geometry)[,2]) %>%
-  bind_cols(twi) %>%
-  rename(twi = hydrosheds_twi_fd8) %>%
-  select(-allRangelands, -igbp, -shrubland, -grassland, -trees, -ID, -id) %>%
-  pivot_longer(cols = starts_with(yearly_vars),
-               names_to = "var", values_to = "value") %>%
-  separate_wider_delim(var, "_", names = c("data", "year")) %>%
-  pivot_wider(names_from = data, values_from = value) %>%
-  mutate(year = as.numeric(year)) %>%
-  select(x, y, index, year, all_of(yearly_vars), all_of(static_vars))
-
-sample_points_mean <- sample_points_clean %>%
-  group_by(index) %>%
-  summarise(across(-year, .fns = \(x) mean(x, na.rm = TRUE))) %>%
-  ungroup()
+# # Load precipitation covariates as a named list of rasters (one per year)
+# ppt_covariate_paths <- Sys.glob(here("data", "raw", "raster", "covariateMaps",
+#                                       "pptVars*.tif"))
+# ppt_covariates <- map(ppt_covariate_paths, rast)
+# names(ppt_covariates) <- years
 
 ```
 
+``` {r process}
 
-``` {r prep}
+dynamic_vars <- c("GPP", "precipitation", "tMean", "parMean", "potentialET")
+static_vars <- c("sand", "slope", "wriTCFrac")
+
+# Map over yearly vars to generate mean raster layers
+
+dynamic_vars_mean <- map(dynamic_vars, function(name) {
+  message("Layer: ", name)
+  var_all_years <- map(dynamic_covariates, function(r) {
+    r[[name]]
+  })
+  
+  var_mean <- var_all_years %>%
+    rast() %>%
+    mean()
+  
+  names(var_mean) <- name
+  
+  var_mean
+}) %>% rast()
+
+
+# Combine with selected static covariates
+static_vars_rast <- static_covariates[[static_vars]]
+static_vars_corrected <- crop(static_vars_rast, dynamic_vars_mean)
+
+combined_rast <- c(dynamic_vars_mean, static_vars_corrected)
+
+# Convert to data.frame
+combined_vars_df <- as.data.frame(combined_rast, xy = TRUE, na.rm = TRUE)
+
+```
+
+
+First, we apply common clustering methods to derive land capability classes:
+
+
+``` {r clustering}
 
 # Set up mlr3 tasks
-tsk_lgs_sp <- sample_points_mean %>%
-  select(-index) %>%
-  as_task_clust()
   
-tsk_lgs_nsp <- sample_points_mean %>%
-  select(-x, -y, -index) %>%
+tsk_lgs <- combined_vars_df %>%
+  select(-x, -y) %>%
   as_task_clust()
 
-# Set up learners
-lrn_k_sp <- lrn("clust.kmeans", predict_type = "partition", centers = 100)
-lrn_k_nsp <- lrn("clust.kmeans", predict_type = "partition", centers = 100)
+# Function to implement k-means with specified k
+fit_k_means <- function(task, k) {
+  
+  message("Finding clusters for k = ", k)
+  
+  # Set up learners
+  lrn_km <- lrn("clust.kmeans",
+                predict_type = "partition",
+                centers = k,
+                algorithm = "Lloyd",
+                nstart = 10,
+                iter.max = 1000
+  )
+  
+  # Preprocessing pipelines
+  
+  po_scale <- po("scale")
+  
+  ppl_km <- as_learner(po_scale %>>% lrn_km)
+  
+  # Perform clustering and add clusters to original data
+  
+  predictions_km <- ppl_km$train(task)$predict(task)
+  
+  message("Clustering complete")
+  
+  predictions_km$partition
+}
 
-lrn_h_sp <- lrn("clust.hclust", predict_type = "partition")
-lrn_h_nsp <- lrn("clust.hclust", predict_type = "partition")
+set.seed(999)
 
-set_threads(lrn_k_sp, n = nc)
-set_threads(lrn_k_nsp, n = nc)
-set_threads(lrn_h_sp, n = nc)
-set_threads(lrn_h_nsp, n = nc)
+tic()
+sample_points_clustered <- combined_vars_df %>%
+  mutate(clusters_k10 = fit_k_means(tsk_lgs, 10),
+         clusters_k20 = fit_k_means(tsk_lgs, 20),
+         clusters_k50 = fit_k_means(tsk_lgs, 50)) %>%
+  pivot_longer(cols = starts_with("clusters"),
+              names_to = "k", values_to = "cluster") %>%
+  mutate(k = substring(k, 11) %>% as.numeric())
+toc()
 
-# Preprocessing pipelines
+write_rds(sample_points_clustered, here("data", "processed", "rds", "clusters.rds"))
 
-po_scale <- po("scale")
+```
 
-ppl_k_sp <- as_learner(po_scale %>>% lrn_k_sp)
-ppl_k_nsp <- as_learner(po_scale %>>% lrn_k_nsp)
 
-ppl_h_sp <- as_learner(po_scale %>>% lrn_h_sp)
-ppl_h_nsp <- as_learner(po_scale %>>% lrn_h_nsp)
+``` {r cluster_viz}
+
+# # Too many points to visualise - need to sample
+# 
+# sample_points_clustered %>%
+#   ggplot(aes(x = x, y = y, colour = cluster)) +
+#   geom_point() +
+#   scale_colour_distiller(palette = "Accent") +
+#   facet_wrap(~k) +
+#   theme_bw()
 
 
 ```
 
 
-``` {r train}
+Once points are assigned to clusters, we can extract the 90th percentile of GPP
+for each cluster as a proxy for a potential or reference GPP. The LGS scaled
+GPP value can then be calculated as either the ratio between estimated and
+potential GPP (possibly the difference between estimated and minimum GPP) or as
+the simple difference between estimated and potential. Here, we use the ratio
+in order to avoid biasing the result to areas with a larger range of GPP values.
 
-ppl_k_sp$train(tsk_lgs_sp)
-ppl_k_nsp$train(tsk_lgs_nsp)
-ppl_h_sp$train(tsk_lgs_sp)
-ppl_h_nsp$train(tsk_lgs_sp)
+```{r lgs}
 
-data_with_preds <- sample_points_mean %>%
-  mutate(group_k_sp = prediction_k_sp$partition,
-         group_k_nsp = prediction_k_nsp$partition,
-         group_h_sp = prediction_h_sp$partition,
-         group_h_nsp = prediction_h_nsp$partition)
+# 90th percentile for each cluster
+quantiles <- sample_points_clustered %>%
+  group_by(cluster, k) %>%
+  summarise(potential = quantile(GPP, 0.9))
 
-ggplot(data_with_preds, aes(x = x, y = y, colour = group_h_sp)) +
-  geom_point() +
-  theme_bw() +
-  scale_colour_distiller(palette = "Accent")
-ggplot(data_with_preds, aes(x = x, y = y, colour = group_h_nsp)) +
-  geom_point() +
-  theme_bw() +
-  scale_colour_distiller(palette = "Accent")
+sample_points_quantiles <- left_join(sample_points_clustered, quantiles)
 
-# table(data_with_preds$group_sp)
+lgs <- sample_points_quantiles %>%
+  group_by(cluster, k) %>%
+  mutate(lgs_abs = GPP - potential,
+         lgs_ratio = GPP / potential,
+         lgs_scaled = (GPP - potential) / (potential - min(GPP)))
 
-
+hist(lgs$lgs_ratio, breaks = 100)
+hist(lgs$lgs_scaled, breaks = 100)
 
 ```
+
