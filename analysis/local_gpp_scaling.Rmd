@@ -23,7 +23,6 @@ library(here)
 
 # Analysis
 library(mlr3verse)
-library(RWeka)
 library(tictoc)
 
 # Visualisation
