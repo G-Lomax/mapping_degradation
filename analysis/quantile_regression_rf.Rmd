@@ -30,7 +30,7 @@ library(tictoc)
 library(tmap)
 
 # Parallelisation
-nc <- (availableCores() - 8) / 2
+nc <- availableCores() - 8
 plan(multisession, workers = nc)
 
 ```
@@ -313,6 +313,7 @@ lrn_ranger_tuned_spt <- lrn(
   predict_type = "response",
   quantreg = TRUE,
   keep.inbag = TRUE,
+  importance = "permutation",
   num.trees = 1001,
   mtry.ratio = to_tune(p_dbl(0, 1)),
   min.node.size = to_tune(p_int(200, 20000, logscale = TRUE)),
@@ -324,6 +325,7 @@ lrn_ranger_tuned_nspt <- lrn(
   predict_type = "response",
   quantreg = TRUE,
   keep.inbag = TRUE,
+  importance = "permutation",
   num.trees = 1001,
   mtry.ratio = to_tune(p_dbl(0, 1)),
   min.node.size = to_tune(p_int(200, 20000, logscale = TRUE)),
@@ -340,7 +342,7 @@ random_tuner <- tnr("random_search")
 perf_msr <- msr("regr.rmse")
 
 at_spt <- auto_tuner(
-  method = random_tuner,
+  tuner = random_tuner,
   learner = lrn_ranger_tuned_spt,
   resampling = spt_cv_plan,
   measure = perf_msr,
@@ -348,7 +350,7 @@ at_spt <- auto_tuner(
 )
 
 at_nspt <- auto_tuner(
-  method = random_tuner,
+  tuner = random_tuner,
   learner = lrn_ranger_tuned_nspt,
   resampling = nspt_cv_plan,
   measure = perf_msr,
@@ -502,7 +504,7 @@ pred_vs_actual_qu <- ggplot(data_with_quantiles_spt %>% sample_frac(0.1), aes(x 
 pred_vs_actual_qu
 
 
-ggsave(here("results", "figures", "fitted_vs_actual_qu_rf_rpi_2.png"),
+ggsave(here("results", "figures", "fitted_vs_actual_qu_rf_rpi.png"),
        pred_vs_actual_qu,
        width = 36, height = 24, units = "cm", dpi = 200)
 
@@ -522,7 +524,9 @@ dataset using the model tuned with LLTO-CV.
 
 sample_points_rpi <- data_with_quantiles_spt %>%
   mutate(rpi = GPP / quantile_pred) %>%
-  bind_cols(sample_points_derived %>% select(id, year, geometry, precipitation))
+  select(-precipitation) %>%
+  bind_cols(sample_points_derived %>% select(index, year, geometry)) %>%
+  mutate(precipitation = sample_points_derived$precipitation)
 
 write_csv(sample_points_rpi,
           here("data", "processed", "csv", "sample_points_rpi.csv"))
@@ -534,7 +538,7 @@ ggplot(sample_points_rpi, aes(x = as.factor(year), y = rpi)) +
   ylim(0, 2)
 
 sample_points_rpi %>%
-  group_by(id) %>%
+  group_by(index) %>%
   summarise(mean_rpi = mean(rpi),
             mean_ppt = first(mean_ppt)) %>%
   ggplot(aes(x = mean_ppt, y = mean_rpi)) +
@@ -565,7 +569,7 @@ sample_points_rpi %>%
 # Plot mean RPI values spatially
 
 sample_points_rpi_mean <- sample_points_rpi %>%
-  group_by(id) %>%
+  group_by(index) %>%
   summarise(mean_rpi = mean(rpi),
             geometry = first(geometry)) %>%
   st_as_sf(crs = 4326)
@@ -574,7 +578,15 @@ library(tmap)
 
 tm_shape(ke_tz) + tm_borders() +
   tm_shape(sample_points_rpi_mean) +
-  tm_dots(col = "mean_rpi", palette = "PiYG", style = "cont", midpoint = 0.8)
+  tm_dots(fill = "mean_rpi",
+          fill.scale = tm_scale_continuous(
+            limits = c(0.2, 1.2),
+            midpoint = 0.7,
+            values = "RdBu",
+            outliers.trunc = c(T,T)
+  ))
+
+
 ```
 
 Observations: - Some annual variations remain in the boxplots, which
@@ -590,124 +602,4 @@ an RPI \< 1; if the regression were perfect, this should be almost
 exactly 90%. This applies across the whole range of precipitation
 values, too.
 
-```{r example}
 
-pixel_ids_df <- sample_points_rpi %>%
-  filter(wriTCFrac < 0.05) %>%
-  select(id)
-
-pixel_ids <- unique(pixel_ids_df$id)
-set.seed(12)
-random_ids <- sample(pixel_ids, 12)
-
-rpi_sample <- sample_points_rpi %>%
-  filter(id %in% random_ids)
-
-ggplot(rpi_sample, aes(x = year, y = rpi)) +
-  geom_line() +
-  facet_wrap(~id, ncol = 3) +
-  theme_bw()
-
-# transparent <- theme(
-#   panel.background = element_rect(fill='transparent'), #transparent panel bg
-#   plot.background = element_rect(fill='transparent', color=NA), #transparent plot bg
-#   panel.grid.major = element_blank(), #remove major gridlines
-#   panel.grid.minor = element_blank(), #remove minor gridlines
-#   legend.background = element_rect(fill='transparent'), #transparent legend bg
-#   legend.box.background = element_rect(fill='transparent'), #transparent legend panel
-#   axis.title = element_text(size = 20),
-#   axis.text.x = element_text(size = 18),
-#   axis.text.y = element_text(size = 0)
-# )
-# 
-# p1 <- ggplot(rpi_sample, aes(x = year, y = mean_ppt * ppt_anomaly)) +
-#   geom_col(fill = "#203864", alpha = 0.75) +
-#   theme_classic() +
-#   labs(x = "Year", y = "Annual rainfall") +
-#   transparent 
-# 
-# p2 <- ggplot(rpi_sample, aes(x = year, y = GPP)) +
-#   geom_col(fill = "#4C5128", alpha = 0.75) +
-#   theme_classic() +
-#   labs(x = "Year", y = "Vegetation productivity") +
-#   transparent 
-# 
-# p3 <- ggplot(rpi_sample, aes(x = year, y = rpi)) +
-#   geom_col(fill = "#843C0C", alpha = 0.75) +
-#   theme_classic() +
-#   labs(x = "Year", y = "Vegetation condition") +
-#   geom_hline(yintercept = 1, alpha = 0.75) +
-#   transparent
-# 
-# p1;p2;p3
-# 
-# target <- random_ids[6]
-# 
-# ggsave(here("results", "figures", "p1.png"), p1, bg = "transparent",
-#        width = 16, height = 12, units = "cm")
-
-```
-
-```{r autocorrelation_and_trends}
-
-rpi_ac <- sample_points_rpi %>%
-  group_by(id) %>%
-  arrange(year, .by_group = TRUE) %>%
-  summarise(ac = acf(rpi, lag.max = 2, plot = FALSE, demean = TRUE)$acf[2],
-            geometry = first(geometry),
-            map = mean(mean_ppt),
-            mat = mean(tMean))
-
-hist(rpi_ac$ac, breaks = 100)
-mean(rpi_ac$ac, na.rm = TRUE)
-
-# Basically no average autocorrelation! What about spatially or by variable?
-tm_shape(rpi_ac %>% st_as_sf(crs = 4326)) + tm_dots(col = "ac", palette = "RdBu") +
-  tm_shape(ke_tz) + tm_borders()
-
-ggplot(rpi_ac, aes(x = map, y = ac)) +
-  geom_point(size = 0.1, alpha = 0.1) +
-  geom_smooth(method = "lm") +
-  theme_bw()
-
-
-# Obviously some spatial clustering, but no clear relationship to ppt or temp
-# Hard to know what that means
-
-rpi_trends <- sample_points_rpi %>%
-  group_by(id, geometry) %>%
-  filter(n() == 19) %>%
-  arrange(year, .by_group = TRUE) %>%
-  nest() %>%
-  mutate(lm = map(data, function(df) {lm(rpi ~ year, data = df)}),
-         kendall = map(data, function(df) {Kendall::MannKendall(df$rpi)}),
-         theil_sen = map(data, function(df) {deming::theilsen(rpi ~ year, data = df)}),
-         map = map(data, function(df) {mean(df$mean_ppt)}),
-         mat = map(data, function(df) {mean(df$tMean)})) %>%
-  select(-data)
-
-rpi_trends_metrics <- rpi_trends %>%
-  mutate(tidy_lm = map(lm, broom::tidy),
-         lm_slope = map(tidy_lm, function(df) {df$estimate[2]}) %>% unlist(),
-         lm_p_value = map(tidy_lm, function(df) {df$p.value[2]}) %>% unlist(),
-         kendall_tau = map(kendall, function(ken) {ken$tau}) %>% unlist(),
-         kendall_p_value = map(kendall, function(ken) {ken$sl}) %>% unlist(),
-         theilsen_slope = map(theil_sen, function(mod) {mod$coefficients[2]}) %>% unlist()) %>%
-  select(-lm, -tidy_lm, -kendall, -theil_sen) %>%
-  ungroup()
-         
-
-head(rpi_trends_metrics)
-
-hist(rpi_trends_metrics$kendall_tau, breaks = 100)
-
-ggplot(rpi_trends_metrics, aes(x = map, y = theilsen_slope)) +
-  geom_point(size = 0.2, alpha = 0.2) +
-  geom_smooth(method = "lm") +
-  theme_bw()
-
-tm_shape(rpi_trends_metrics %>% st_as_sf(crs = 4326)) + tm_dots(col = "theilsen_slope", palette = "RdBu", style = "cont") +
-  tm_shape(ke_tz) + tm_borders()
-
-
-```
