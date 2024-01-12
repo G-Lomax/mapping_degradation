@@ -359,7 +359,7 @@ at_nspt <- auto_tuner(
 
 ```
 
-```{r rf_tuning, eval = FALSE}
+```{r rf_tuning, results = FALSE, message = FALSE}
 # Spatial model
 
 set.seed(789)
