@@ -6,6 +6,7 @@ date: 2023-06-19
 editor_options: 
   markdown: 
     wrap: 72
+  chunk_output_type: console
 ---
 
 This Notebook conducts quantile regression on rangeland productivity
@@ -91,37 +92,6 @@ sample_points_derived <- sample_points %>%
 
 ```
 
-# Exploratory data analysis
-
-```{r eda}
-
-# Study area map and sample points
-
-tm_shape(ke_tz) + tm_borders() +
-  tm_shape(sample_points_raw) + tm_dots(col = "brown", size = 0.01)
-
-# Fractions of tree cover in dataset
-
-ggplot(sample_points_derived, aes(x = wriTCFrac)) +
-  geom_histogram(fill = "lightgreen", colour = "forestgreen", bins = 100) +
-  theme_bw()
-
-# GPP-PPT relationship for different fractions of grassland/shrubland
-
-sample_points_derived %>%
-  mutate(woody_cat = cut_width(wriTCFrac, 20, boundary = 0)) %>%
-ggplot(aes(x = precipitation, y = GPP)) +
-  geom_point(size = 0.1, alpha = 0.05) +
-  facet_wrap(~woody_cat) +
-  theme_bw() +
-  xlim(0, 1200) +
-  ylim(0, 6000) +
-  labs(title = "GPP vs precipitation by tree cover fraction")
-
-
-
-```
-
 # Data preparation for RF modelling
 
 We select variables to use for modelling, remove rows containing NA
@@ -193,8 +163,6 @@ lrn_ranger_untuned <- lrn("regr.ranger",
                           min.node.size = 200,
                           sample.fraction = 0.5
 )
-
-set_threads(lrn_ranger_untuned, 4)
 
 # Create resampling strategy
 
@@ -359,16 +327,16 @@ at_nspt <- auto_tuner(
 
 ```
 
-```{r rf_tuning, results = FALSE, message = FALSE}
+
+
+```{r rf_tuning, include=FALSE}
 # Spatial model
 
 set.seed(789)
 
 tic()
-rf_tuned_spt <- progressr::with_progress(
-  at_spt$train(task_gpp_spt)
-)
-toc(log = T)
+rf_tuned_spt <- at_spt$train(task_gpp_spt)
+toc()
 # beep(3)
 
 write_rds(rf_tuned_spt, here("results", "rds", "rf_tuned_spt.rds"))
@@ -381,10 +349,8 @@ write_rds(rf_tuned_spt, here("results", "rds", "rf_tuned_spt.rds"))
 set.seed(987)
 
 tic()
-rf_tuned_nspt <- progressr::with_progress(
-  at_nspt$train(task_gpp_nspt)
-)
-toc(log = T)
+rf_tuned_nspt <-at_nspt$train(task_gpp_nspt)
+toc()
 # beep(3)
 
 write_rds(rf_tuned_nspt, here("results", "rds", "rf_tuned_nspt.rds"))
@@ -405,7 +371,6 @@ rf_tuned_nspt <- read_rds(here("results", "rds", "rf_tuned_nspt.rds"))
 
 # Measures to evaluate model performance
 measures <- msrs(c("regr.mae", "regr.rmse", "regr.rsq"))
-measures_micro <- msrs(c("regr.mae", "regr.rmse", "regr.rsq"), average = "micro")
 
 rf_predictions_spt <- rf_tuned_spt$predict(task_gpp_spt)
 rf_predictions_nspt <- rf_tuned_nspt$predict(task_gpp_nspt)
@@ -413,100 +378,66 @@ rf_predictions_nspt <- rf_tuned_nspt$predict(task_gpp_nspt)
 rf_predictions_spt$score(measures)
 rf_predictions_nspt$score(measures)
 
-rf_predictions_spt$score(measures_micro)
-rf_predictions_nspt$score(measures_micro)
-
-# Plot predicted vs true values
-
-rf_predictions_spt %>%
-  ggplot(aes(x = response, y = truth)) +
-  geom_point(size = 0.1, alpha = 0.1) +
-  geom_abline(intercept = 0, slope = 1, colour = "red") +
-  theme_classic() +
-  labs(title = "With spatiotemporal CV")
-
-rf_predictions_nspt %>%
-  ggplot(aes(x = response, y = truth)) +
-  geom_point(size = 0.1, alpha = 0.1) +
-  geom_abline(intercept = 0, slope = 1, colour = "red") +
-  theme_classic() +
-  labs(title = "With random CV")
+# # Plot predicted vs true values
+# 
+# rf_predictions_spt %>%
+#   ggplot(aes(x = response, y = truth)) +
+#   geom_point(size = 0.1, alpha = 0.1) +
+#   geom_abline(intercept = 0, slope = 1, colour = "red") +
+#   theme_classic() +
+#   labs(title = "With spatiotemporal CV")
+# 
+# rf_predictions_nspt %>%
+#   ggplot(aes(x = response, y = truth)) +
+#   geom_point(size = 0.1, alpha = 0.1) +
+#   geom_abline(intercept = 0, slope = 1, colour = "red") +
+#   theme_classic() +
+#   labs(title = "With random CV")
 
 # Predicted quantile values
 rf_predictions_spt_qu <- predict(rf_tuned_spt$learner$model, task_gpp_spt$data(), type = "quantiles", quantiles = 0.9)
-rf_predictions_nspt_qu <- predict(rf_tuned_nspt$learner$model, task_gpp_nspt$data(), type = "quantiles", quantiles = 0.9)
+# rf_predictions_nspt_qu <- predict(rf_tuned_nspt$learner$model, task_gpp_nspt$data(), type = "quantiles", quantiles = 0.9)
 
 data_with_quantiles_spt <- task_gpp_spt$data() %>%
   bind_cols(rf_predictions_spt_qu$predictions) %>%
-  rename(quantile_pred = "quantile= 0.9")
-data_with_quantiles_nspt <- task_gpp_nspt$data() %>%
-  bind_cols(rf_predictions_nspt_qu$predictions) %>%
-  rename(quantile_pred = "quantile= 0.9")
+  rename(quantile_pred = "quantile= 0.9") %>%
+  mutate(quantile_pred = quantile_pred / 1000,
+         GPP = GPP / 1000)
+# data_with_quantiles_nspt <- task_gpp_nspt$data() %>%
+#   bind_cols(rf_predictions_nspt_qu$predictions) %>%
+#   rename(quantile_pred = "quantile= 0.9")
 
-ggplot(data_with_quantiles_spt, aes(x = quantile_pred, y = GPP)) +
-  geom_point(size = 0.1, alpha = 0.1) +
-  geom_abline(slope = seq(0.2, 1, 0.2), intercept = 0, colour = "grey") +
+density_breaks <- c(1, 10, 100, 1000, 10000)
+
+density_plot <- ggplot(data_with_quantiles_spt, aes(x = quantile_pred, y = GPP)) +
+  geom_hex(bins = 60) +
+  scale_fill_viridis_c(direction = 1, trans = "log", breaks = density_breaks) +
+  geom_abline(slope = seq(0.2, 1, 0.2), intercept = 0, colour = "red", lwd = 0.2, linetype = "longdash") +
   geom_abline(slope = 1, intercept = 0, colour = "red") +
   theme_classic() +
-  xlim(0, 10000) +
-  ylim(0, 10000) +
-  labs(x = "Predicted 0.9 quantile",
-       y = "True value",
-       title = "Predicted vs actual GPP (g C m-2 yr-1)",
-       subtitle = "Trained with spatiotemporal CV")
+  theme(legend.position = c(0.1, 0.8), legend.key.height = unit(1.5, "cm")) +
+  xlim(0, 10) +
+  ylim(0, 10) +
+  labs(x = expression(atop("Potential GPP", (kg~C~m^-2~yr^-1))),
+       y = expression(atop("Actual GPP", (kg~C~m^-2~yr^-1))),
+       fill = "Number of points")
 
-ggplot(data_with_quantiles_nspt, aes(x = quantile_pred, y = GPP)) +
-  geom_point(size = 0.1, alpha = 0.1) +
-  geom_abline(slope = seq(0.2, 1, 0.2), intercept = 0, colour = "grey") +
-  geom_abline(slope = 1, intercept = 0, colour = "red") +
-  theme_classic() +
-  xlim(0, 10000) +
-  ylim(0, 10000) +
-  labs(x = "Predicted 0.9 quantile",
-       y = "True value",
-       title = "Predicted vs actual GPP (g C m-2 yr-1)",
-       subtitle = "Trained with random CV")
+# ggplot(data_with_quantiles_nspt, aes(x = quantile_pred, y = GPP)) +
+#   geom_point(size = 0.1, alpha = 0.1) +
+#   geom_abline(slope = seq(0.2, 1, 0.2), intercept = 0, colour = "grey") +
+#   geom_abline(slope = 1, intercept = 0, colour = "red") +
+#   theme_classic() +
+#   xlim(0, 10000) +
+#   ylim(0, 10000) +
+#   labs(x = "Predicted 0.9 quantile",
+#        y = "True value",
+#        title = "Predicted vs actual GPP (g C m-2 yr-1)",
+#        subtitle = "Trained with random CV")
+# 
 
-plot_theme <- theme(
-    panel.background = element_rect(fill='transparent'), #transparent panel bg
-    plot.background = element_rect(fill='transparent', color=NA), #transparent plot bg
-    panel.grid.major = element_blank(), #remove major gridlines
-    panel.grid.minor = element_blank(), #remove minor gridlines
-    legend.background = element_rect(fill='transparent'), #transparent legend bg
-    legend.box.background = element_rect(fill='transparent'), #transparent legend panel
-    axis.title = element_text(size = 22),
-    axis.text = element_text(size = 22),
-    axis.ticks = element_line(linewidth = 1.2),
-    axis.line = element_line(linewidth = 1.2),
-    aspect.ratio = 2/3
-  )
-
-pred_vs_actual_mean <- ggplot(rf_predictions_spt, aes(x = response, y = truth)) +
-  geom_point(size = 0.1, alpha = 0.1, colour = "#2D4443") +
-  geom_smooth(method = "gam", colour = "#ED7A2C") +
-  geom_abline(intercept = 0, slope = 1, colour = "red") +
-  xlim(0,6000) + ylim(0,6000) +
-  theme_classic() +
-  labs(x = expression(Predicted~GPP~(g~C~m^-2~yr^-1)),
-       y = expression(Actual~GPP~(g~C~m^-2~yr^-1)))
-
-set.seed(333)
-pred_vs_actual_qu <- ggplot(data_with_quantiles_spt %>% sample_frac(0.1), aes(x = quantile_pred, y = GPP)) +
-  # geom_point(size = 0.4, alpha = 0.4, colour = "#2D4443") +
-  geom_abline(slope = seq(0.2, 1, 0.2), intercept = 0, colour = "#ED7A2C", lwd = 0.6, linetype = "longdash") +
-  # geom_abline(slope = 1, intercept = 0, colour = "#ED7A2C", lwd = 1.2) +
-  theme_classic() +
-  xlim(0,7000) + ylim(0,7000) +
-  labs(x = "Predicted baseline GPP\n(0.9 quantile)",
-       y = expression(Actual~GPP~(g~C~m^-2~yr^-1))) +
-  plot_theme
-
-pred_vs_actual_qu
-
-
-ggsave(here("results", "figures", "fitted_vs_actual_qu_rf_rpi.png"),
-       pred_vs_actual_qu,
-       width = 36, height = 24, units = "cm", dpi = 200)
+# ggsave(here("results", "figures", "fitted_vs_actual_qu_rf_rpi.png"),
+#        pred_vs_actual_qu,
+#        width = 36, height = 24, units = "cm", dpi = 200)
 
 ```
 
@@ -516,6 +447,26 @@ degree of skill, and allow calculation of RPI.
 Both models have similar performance, perhaps because I constrained them
 to retain a minimum of 200 points in each node to minimise overfitting.
 I need to check whether this works!
+
+Variable importance:
+
+```{r importance}
+
+# Variable importance
+
+importance_spt <- rf_tuned_spt$learner$importance()
+importance_nspt <- rf_tuned_nspt$learner$importance()
+
+importance_spt_df <- tibble(variable = names(importance_spt),
+                            importance = as.vector(importance_spt))
+importance_nspt_df <- tibble(variable = names(importance_nspt),
+                            importance = as.vector(importance_nspt))
+
+
+```
+
+
+
 
 Add predictions to task data table and calculate RPI for the sample
 dataset using the model tuned with LLTO-CV.
