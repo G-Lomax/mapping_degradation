@@ -63,17 +63,18 @@ years <- str_extract(dynamic_covariates_paths, "\\d\\d\\d\\d")
 dynamic_covariates <- map(dynamic_covariates_paths, rast)
 names(dynamic_covariates) <- years
 
-# # Load precipitation covariates as a named list of rasters (one per year)
-# ppt_covariate_paths <- Sys.glob(here("data", "raw", "raster", "covariateMaps",
-#                                       "pptVars*.tif"))
-# ppt_covariates <- map(ppt_covariate_paths, rast)
-# names(ppt_covariates) <- years
+# Load precipitation covariates as a named list of rasters (one per year)
+ppt_covariate_paths <- Sys.glob(here("data", "raw", "raster", "covariateMaps",
+                                      "pptVars*.tif"))
+ppt_covariates <- map(ppt_covariate_paths, rast)
+names(ppt_covariates) <- years
 
 ```
 
 ``` {r process}
 
 dynamic_vars <- c("GPP", "precipitation", "tMean", "parMean", "potentialET")
+ppt_vars <- c("intensity", "ugi", "meanPptDay")
 static_vars <- c("sand", "slope", "wriTCFrac")
 
 # Map over yearly vars to generate mean raster layers
@@ -93,12 +94,29 @@ dynamic_vars_mean <- map(dynamic_vars, function(name) {
   var_mean
 }) %>% rast()
 
+ppt_vars_mean <- map(ppt_vars, function(name) {
+  message("Layer: ", name)
+  var_all_years <- map(ppt_covariates, function(r) {
+    r[[name]]
+  })
+  
+  var_mean <- var_all_years %>%
+    rast() %>%
+    mean()
+  
+  names(var_mean) <- name
+  
+  var_mean
+}) %>% rast()
+
 
 # Combine with selected static covariates
 static_vars_rast <- static_covariates[[static_vars]]
-static_vars_corrected <- crop(static_vars_rast, dynamic_vars_mean)
 
-combined_rast <- c(dynamic_vars_mean, static_vars_corrected)
+ppt_vars_crop <- crop(ppt_vars_mean, dynamic_vars_mean)
+static_vars_crop <- crop(static_vars_rast, dynamic_vars_mean)
+
+combined_rast <- c(dynamic_vars_mean, ppt_vars_crop, static_vars_crop)
 
 # Convert to data.frame
 combined_vars_df <- as.data.frame(combined_rast, xy = TRUE, na.rm = TRUE)
@@ -166,7 +184,7 @@ sample_points_clustered <- combined_vars_df %>%
   mutate(k = substring(k, 11) %>% as.numeric())
 toc()
 
-write_rds(sample_points_clustered, here("data", "processed", "rds", "clusters.rds"))
+write_rds(sample_points_clustered, here("data", "processed", "rds", "clusters_with_ppt.rds"))
 
 ```
 
@@ -237,8 +255,8 @@ lgs_map <- tm_shape(ke_tz) +
   tm_fill("grey90") +
   tm_shape(lgs_rasters[[index]]$lgs_ratio) +
   tm_raster(col.scale = tm_scale_continuous(
-    limits = c(0,1.5),
-    midpoint = 0.75,
+    limits = c(0.4,1.2),
+    midpoint = 0.8,
     outliers.trunc = c(T,T),
     values = "RdBu"
   ),
@@ -305,7 +323,7 @@ LGS ratios becomes smaller and the method becomes less sensitive.
 # Save LGS rasters to disk for comparison with other results
 
 for (i in seq_along(k_list)) {
-  filename <- paste0("lgs_rast_", k_list[i], ".tif")
+  filename <- paste0("lgs_rast_with_ppt_", k_list[i], ".tif")
   
   r <- lgs_rasters[[i]]
   
