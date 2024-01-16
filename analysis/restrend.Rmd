@@ -65,13 +65,17 @@ names(gpp) <- paste0("gpp_", years)
 
 Calculate RESTREND on all pixels
 
-```{r rue_restrend}
+```{r rue}
 
 # Calculate simple rain use efficiency
 
 rue <- gpp / precipitation
 
-# Calculate rain use efficiency trend
+# Mean RUE
+rue_mean = mean(rue)
+names(rue_mean) <- "mean_rue"
+
+# RUE Trend using Theil Sen regression slope
 tic()
 rue_trend <- app(rue, function(ts) {
   if (any(is.na(ts))) {
@@ -91,7 +95,15 @@ toc()
 
 names(rue_trend) <- c("rue_slope", "r_sq", "p_value")
 
+# Write rasters to disk
+writeRaster(rue_mean, here("data", "processed", "raster", "rue_mean.tif"))
 writeRaster(rue_trend, here("data", "processed", "raster", "rue_trend.tif"))
+
+```
+
+Calculate RESTREND residuals and residual trend
+
+``` {r restrend}
 
 # Function to extract model params and residuals from linear models fitted to
 # the time series in each pixel
@@ -184,13 +196,6 @@ names(restrend_results)[5:7] <- c("resid_slope", "resid_rsq", "resid_p_value")
 
 writeRaster(restrend_results, here("data", "processed", "raster", "restrend_results.tif"),
             overwrite = TRUE)
-
-```
-
-
-```{r restrend_viz}
-
-
 
 ```
 
