@@ -1,5 +1,5 @@
 ---
-title: "RESTREND"
+title: "RESTREND and RUE"
 output: html_notebook
 date: 2023-11-27
 author: "Guy Lomax"
@@ -11,13 +11,19 @@ author: "Guy Lomax"
 library(tidyverse)
 library(sf)
 library(terra)
+library(data.table)
 library(here)
 
 # Analysis
 library(tictoc)
+library(future)
+library(purrr)
 
 # Visualisation
 library(tmap)
+
+nc <- availableCores()
+plan(multisession, workers = 8)
 
 
 ```
@@ -51,13 +57,14 @@ Data preparation
 # Simplify dynamic covariates raster to only GPP and precipitation
 precipitation <- map(dynamic_covariates, function(r) r$precipitation) %>%
   rast()
+tMean <- map(dynamic_covariates, function(r) r$tMean) %>%
+  rast()
 gpp <- map(dynamic_covariates, function(r) r$GPP) %>%
   rast()
 
 names(precipitation) <- paste0("precipitation_", years)
+names(tMean) <- paste0("tMean_", years)
 names(gpp) <- paste0("gpp_", years)
-
-
 
 ```
 
@@ -70,6 +77,9 @@ Calculate RESTREND on all pixels
 # Calculate simple rain use efficiency
 
 rue <- gpp / precipitation
+
+writeRaster(rue, here("data", "processed", "raster", "rue", "rue_all.tif"),
+            overwrite = TRUE)
 
 # Mean RUE
 rue_mean = mean(rue)
@@ -96,8 +106,8 @@ toc()
 names(rue_trend) <- c("rue_slope", "r_sq", "p_value")
 
 # Write rasters to disk
-writeRaster(rue_mean, here("data", "processed", "raster", "rue_mean.tif"))
-writeRaster(rue_trend, here("data", "processed", "raster", "rue_trend.tif"))
+writeRaster(rue_mean, here("data", "processed", "raster", "rue_mean.tif"), overwrite = TRUE)
+writeRaster(rue_trend, here("data", "processed", "raster", "rue_trend.tif"), overwrite = TRUE)
 
 ```
 
@@ -108,16 +118,19 @@ Calculate RESTREND residuals and residual trend
 # Function to extract model params and residuals from linear models fitted to
 # the time series in each pixel
 
-fit_restrend <- function(gpp_rast, ppt_rast) {
+fit_restrend <- function(gpp_rast, ppt_rast, tMean_rast) {
   
   # Convert rasters to a single data frame
   message("Converting to data frames\n")
 
   gpp_values <- as.data.frame(gpp_rast, cells = TRUE, xy = TRUE)
   ppt_values <- as.data.frame(ppt_rast, cells = TRUE, xy = FALSE)
+  tMean_values <- as.data.frame(tMean_rast, cells = TRUE, xy = FALSE)
   
-  data_df <- left_join(gpp_values, ppt_values, by = "cell") %>%
-    pivot_longer(cols = starts_with(c("gpp", "precipitation"))) %>%
+  data_df <- gpp_values %>%
+    left_join(ppt_values, by = "cell") %>%
+    left_join(tMean_values, by = "cell") %>%
+    pivot_longer(cols = starts_with(c("gpp", "precipitation", "tMean"))) %>%
     separate_wider_delim(cols = "name", delim = "_", names = c("var", "year")) %>%
     pivot_wider(id_cols = c(cell, x, y, year), names_from = var, values_from = value)
   
@@ -126,23 +139,29 @@ fit_restrend <- function(gpp_rast, ppt_rast) {
   
   apply_restrend <- function(df) {
     
-    model <- lm(gpp ~ precipitation, data = df)
+    model <- lm(gpp ~ precipitation + tMean, data = df)
 
     yint <- coef(model)[1]
-    slope <- coef(model)[2]
+    ppt_slope <- coef(model)[2]
+    t_slope <- coef(model)[3]
 
     r_sq <- broom::glance(model)$r.squared
-    p_value <- broom::tidy(model)$p.value[2]
+    ppt_p_value <- broom::tidy(model)$p.value[2]
+    t_p_value <- broom::tidy(model)$p.value[3]
 
     resids <- residuals(model)
     
-    output <- c(yint, slope, r_sq, p_value, resids)
+    output <- c(yint, ppt_slope, t_slope, r_sq, ppt_p_value, t_p_value, resids)
     
     if (length(output) == 23) {
-      names(output) <- c("yint", "slope", "rsq", "p_value", paste0("resid_", years))
+      names(output) <- c("yint", "ppt_slope", "t_slope",
+                         "rsq", "ppt_p_value", "t_p_value", 
+                         paste0("resid_", years))
     } else {
       output <- rep(NA, 23)
-      names(output) <- c("yint", "slope", "rsq", "p_value", paste0("resid_", years))
+      names(output) <- c("yint", "ppt_slope", "t_slope",
+                         "rsq", "ppt_p_value", "t_p_value", 
+                         paste0("resid_", years))
     }
     
     output
@@ -151,7 +170,7 @@ fit_restrend <- function(gpp_rast, ppt_rast) {
   restrend_df <- data_df %>%
     group_by(cell, x, y) %>%
     nest() %>%
-    mutate(restrend_list = map(data, apply_restrend)) %>%
+    mutate(restrend_list = future_map(data, apply_restrend)) %>%
     ungroup() %>%
     select(x,y,restrend_list) %>%
     unnest_wider(restrend_list)
@@ -178,7 +197,7 @@ restrend_results <- app(restrend_rast, function(x) {
   if (any(is.na(x))) {
     results <- rep(NA, 3)
   } else {
-    df <- tibble(year = seq_len(length(resids)), resids = resids)
+    df <- data.table(year = seq_len(length(resids)), resids = resids)
     mod <- RobustLinearReg::theil_sen_regression(resids ~ year, data = df)
     
     resid_slope <- coef(mod)[2]
