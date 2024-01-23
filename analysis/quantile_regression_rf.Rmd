@@ -122,11 +122,11 @@ vars_to_retain <- c(
   "index",
   "year",
   "GPP",
-  "precipitation",
+  # "precipitation",
   "mean_ppt",
   "ppt_anomaly",
   "meanPptDay_anomaly",
-  "sdii",
+  "intensity",
   "ugi",
   "slope",
   "distToRiver",
@@ -226,7 +226,7 @@ nspt_feature_select <- fsi(
 # write_rds(spt_feature_set, here("results", "rds", "spt_features.rds"))
 # rm(spt_feature_select, spt_feature_set)
 # gc()
-# 
+
 # set.seed(456)
 # tic()
 # progressr::with_progress(
@@ -344,19 +344,19 @@ write_rds(rf_tuned_spt, here("results", "rds", "rf_tuned_spt.rds"))
 # rm(rf_tuned_spt)
 # gc()
 
-# Non-spatial RF model (random CV)
-
-set.seed(987)
-
-tic()
-rf_tuned_nspt <-at_nspt$train(task_gpp_nspt)
-toc()
-# beep(3)
-
-write_rds(rf_tuned_nspt, here("results", "rds", "rf_tuned_nspt.rds"))
-
-rm(rf_tuned_nspt)
-gc()
+# # Non-spatial RF model (random CV)
+# 
+# set.seed(987)
+# 
+# tic()
+# rf_tuned_nspt <-at_nspt$train(task_gpp_nspt)
+# toc()
+# # beep(3)
+# 
+# write_rds(rf_tuned_nspt, here("results", "rds", "rf_tuned_nspt.rds"))
+# 
+# rm(rf_tuned_nspt)
+# gc()
 
 
 
