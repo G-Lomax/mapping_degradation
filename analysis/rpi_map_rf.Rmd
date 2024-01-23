@@ -30,9 +30,6 @@ library(tmap)
 
 tmap_options(check.and.fix = TRUE)
 
-# Set up parallel computing
-plan(multisession, workers = availableCores() - 8)
-
 
 
 ```
@@ -113,9 +110,6 @@ Prepare functions for data preparation, model fitting and prediction to raster
 
 raster_to_df <- function(year) {
   
-  # Progress message
-  message(paste0("Processing year ", year))
-  
   # Extract yearly covariates
   dynamic_rast <- dynamic_covariates[[year]]
   ppt_rast <- ppt_covariates_crop[[year]]
@@ -152,7 +146,8 @@ clean_df <- function(df) {
 add_derived_variables <- function(df) {
   df_derived <- df %>%
     mutate(ppt_anomaly = precipitation / mean_ppt,
-           meanPptDay_anomaly = meanPptDay - mean(meanPptDay))
+           meanPptDay_anomaly = meanPptDay - mean(meanPptDay)) %>%
+    rename(sdii = intensity)
   
   df_derived
 }
@@ -160,11 +155,12 @@ add_derived_variables <- function(df) {
 # Predict potential GPP values
 predict_gpp <- function(df) {
   
-  predictions <- predict(model, data = df, type = "quantiles", quantiles = 0.9)
+  predictions_q <- predict(model, data = df, type = "quantiles", quantiles = 0.9)
+  predictions_m <- predict(model, data = df)
   
   df_fitted <- df %>%
-    bind_cols(predictions$predictions) %>%
-    rename(fitted = "quantile= 0.9")
+    mutate(quantile_pred = predictions_q$predictions,
+           mean_pred = predictions_m$predictions)
   
   df_fitted
 }
@@ -172,7 +168,7 @@ predict_gpp <- function(df) {
 # Calculate RPI
 
 calc_rpi <- function(df) {
-  df_rpi <- mutate(df, rpi = GPP / fitted)
+  df_rpi <- mutate(df, rpi = GPP / quantile_pred)
   df_rpi
 }
 
@@ -180,7 +176,7 @@ calc_rpi <- function(df) {
 
 df_to_raster <- function(df, target) {
   df_to_convert <- df %>%
-    select(x, y, GPP, fitted, rpi)
+    select(x, y, GPP, quantile_pred, mean_pred, rpi)
   
   names <- colnames(df_to_convert)[3:ncol(df_to_convert)]
   
@@ -201,8 +197,11 @@ as processing is completed.
 
 ```{r calc_rpi, eval = FALSE}
 
-for (i in years[13:19]) {
+for (i in years) {
   tic()
+  
+  # Progress message
+  message(paste0("Processing year ", i))
 
   # Convert to df
   df <- raster_to_df(i)
@@ -233,7 +232,7 @@ for (i in years[13:19]) {
   message("Conversion to raster complete")
   
   # Write to raster file
-  filename <- paste0("rf_rpi_rast_", i, ".tif")
+  filename <- paste0("rf_rpi_", i, ".tif")
   writeRaster(rpi_rast,
               here("data", "processed", "raster", "rpi", filename),
               overwrite = TRUE)
