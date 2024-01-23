@@ -1,0 +1,106 @@
+---
+title: "Results"
+output: html_notebook
+author: Guy Lomax
+date: 2024-01-12
+editor_options: 
+  chunk_output_type: console
+---
+
+This notebook compares the results of the RPI methodology with those of RUE,
+RESTREND and LGS.
+
+```{r setup}
+
+library(tidyverse)
+library(terra)
+library(sf)
+library(here)
+library(tmap)
+
+```
+
+
+```{r load}
+
+# Country polygons
+ke_tz <- st_read(here("data", "raw", "vector", "kenya_tanzania.geojson"))
+
+# Potential and actual GPP values from RPI model
+potential_gpp_all <- rpi_paths %>%
+  map(function(path) rast(path) %>% subset("fitted")) %>%
+  rast()
+names(potential_gpp_all) <- paste0("potential_", 2000:2018)
+
+actual_gpp_all <- rpi_paths %>%
+  map(function(path) rast(path) %>% subset("GPP")) %>%
+  rast()
+names(actual_gpp_all) <- paste0("actual_", 2000:2018)
+
+# RPI layers and trend
+rpi_paths <- Sys.glob(here("data", "processed", "raster", "rpi", "rf_rpi_rast_20*.tif"))
+
+rpi_all <- rpi_paths %>%
+  map(function(path) rast(path) %>% subset("rpi")) %>%
+  rast()
+names(rpi_all) <- paste0("rpi_", 2000:2018)
+
+rpi_ts_trend <- rast(here("data", "processed", "raster", "rpi", "rf_rpi_ts_trend.tif"))
+
+# RUE layers and trend
+rue_all <- rast(here("data", "processed", "raster", "rue", "rue_all.tif"))
+rue_ts_trend <- rast(here("data", "processed", "raster", "rue", "rue_trend.tif"))
+
+# RESTREND residuals and trend
+restrend_residuals <- rast(here("data", "processed", "raster", "restrend", "restrend_resids.tif"))[5:23]
+restrend <- rast(here("data", "processed", "raster", "restrend", "restrend_results.tif"))
+
+names(restrend_residuals) <- paste0("restrend_resids_", 2000:2018)
+names(restrend) <- c("model_yint", "model_slope", "model_rsq", "model_p_value",
+                     "resid_slope", "resid_rsq", "resid_p_value")
+
+# Key covariates for comparison/exploration of results
+dynamic_covariate_paths <- Sys.glob(here("data", "raw", "raster", "covariateMaps", "dynamicVars*.tif"))
+ppt_all <- dynamic_covariate_paths %>%
+  map(function(path) rast(path) %>% subset("precipitation")) %>%
+  rast()
+tMean_all <- dynamic_covariate_paths %>%
+  map(function(path) rast(path) %>% subset("tMean")) %>%
+  rast()
+tree_cover <- rast(here("data", "raw", "raster", "covariateMaps", "staticVars.tif")) %>%
+  subset("wriTCFrac") %>%
+  crop(ppt_all)
+  
+
+```
+
+
+Now we calculate the R-squared and the weighted mean absolute error per pixel
+for each method. How would that work for RUE? It's basically a linear regression
+with intercept = 0, so I could just calculate the annual difference from the
+expected RUE value each year? 
+
+```{r pixel_wise_error}
+
+# RUE
+
+
+
+
+```
+
+
+
+We can compare the performance of our method with those of others on various
+criteria. For mean values across space, the key issues are:
+- Explaining a greater share of spatial variation with environmental
+covariates (R-squared)
+- Reduced overall variance?
+- Consistency (lack of sharp boundaries)
+- Lack of correlation with MAP or other key vars
+
+For trend, we can assess performance through:
+- High R-squared for each pixel
+- Low mean absolute error (weighted?) for each pixel
+- Consistency in Mann-Kendall trend?
+- P-values of Theil-Sen slope or permutation trend?
