@@ -17,13 +17,13 @@ library(here)
 # Analysis
 library(tictoc)
 library(future)
-library(purrr)
+library(furrr)
 
 # Visualisation
 library(tmap)
 
-nc <- availableCores()
-plan(multisession, workers = 8)
+nc <- availableCores() / 2
+plan(multisession, workers = nc)
 
 
 ```
@@ -123,16 +123,17 @@ fit_restrend <- function(gpp_rast, ppt_rast, tMean_rast) {
   # Convert rasters to a single data frame
   message("Converting to data frames\n")
 
-  gpp_values <- as.data.frame(gpp_rast, cells = TRUE, xy = TRUE)
-  ppt_values <- as.data.frame(ppt_rast, cells = TRUE, xy = FALSE)
-  tMean_values <- as.data.frame(tMean_rast, cells = TRUE, xy = FALSE)
+  gpp_values <- as.data.frame(gpp_rast, cells = TRUE, xy = TRUE, na.rm = T)
+  ppt_values <- as.data.frame(ppt_rast, cells = TRUE, xy = FALSE, na.rm = T)
+  tMean_values <- as.data.frame(tMean_rast, cells = TRUE, xy = FALSE, na.rm = T)
   
   data_df <- gpp_values %>%
     left_join(ppt_values, by = "cell") %>%
     left_join(tMean_values, by = "cell") %>%
     pivot_longer(cols = starts_with(c("gpp", "precipitation", "tMean"))) %>%
     separate_wider_delim(cols = "name", delim = "_", names = c("var", "year")) %>%
-    pivot_wider(id_cols = c(cell, x, y, year), names_from = var, values_from = value)
+    pivot_wider(id_cols = c(cell, x, y, year), names_from = var, values_from = value) %>%
+    drop_na()
   
   # Apply RESTREND function to each cell in data frame
   message("Building models and calculating residuals\n")
@@ -153,12 +154,12 @@ fit_restrend <- function(gpp_rast, ppt_rast, tMean_rast) {
     
     output <- c(yint, ppt_slope, t_slope, r_sq, ppt_p_value, t_p_value, resids)
     
-    if (length(output) == 23) {
+    if (length(output) == 25) {
       names(output) <- c("yint", "ppt_slope", "t_slope",
                          "rsq", "ppt_p_value", "t_p_value", 
                          paste0("resid_", years))
     } else {
-      output <- rep(NA, 23)
+      output <- rep(NA, 25)
       names(output) <- c("yint", "ppt_slope", "t_slope",
                          "rsq", "ppt_p_value", "t_p_value", 
                          paste0("resid_", years))
@@ -170,8 +171,8 @@ fit_restrend <- function(gpp_rast, ppt_rast, tMean_rast) {
   restrend_df <- data_df %>%
     group_by(cell, x, y) %>%
     nest() %>%
-    mutate(restrend_list = future_map(data, apply_restrend)) %>%
     ungroup() %>%
+    mutate(restrend_list = future_map(data, apply_restrend)) %>%
     select(x,y,restrend_list) %>%
     unnest_wider(restrend_list)
   
@@ -181,9 +182,10 @@ fit_restrend <- function(gpp_rast, ppt_rast, tMean_rast) {
 }
 
 tictoc::tic()
-restrend_rast <- fit_restrend(gpp, precipitation)
+restrend_rast <- fit_restrend(gpp, precipitation, tMean)
 tictoc::toc()
-writeRaster(restrend_rast, here("data", "processed", "raster", "restrend_resids.tif"))
+writeRaster(restrend_rast, here("data", "processed", "raster", "restrend_resids.tif"),
+            overwrite = TRUE)
 
 # Calculate residual trend
 
