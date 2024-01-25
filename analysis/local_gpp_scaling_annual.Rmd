@@ -22,13 +22,18 @@ library(tidyverse)
 library(sf)
 library(terra)
 library(here)
+library(data.table)
 
 # Analysis
 library(mlr3verse)
 library(tictoc)
+library(future)
 
 # Visualisation
 library(tmap)
+
+# nc <- 19
+# plan(multisession, workers = nc)
 
 ```
 
@@ -71,57 +76,67 @@ ppt_covariate_paths <- Sys.glob(here("data", "raw", "raster", "covariateMaps",
 ppt_covariates <- map(ppt_covariate_paths, rast)
 names(ppt_covariates) <- years
 
+# Crop static and ppt variables to dynamic variable extent
+
+ppt_covariates_crop <- map(ppt_covariates, crop, dynamic_covariates[[1]])
+static_covariates_crop <- crop(static_covariates, dynamic_covariates[[1]])
+
 ```
 
 ``` {r process}
 
 dynamic_vars <- c("GPP", "precipitation", "tMean", "parMean", "potentialET")
-ppt_vars <- c("intensity", "ugi", "meanPptDay")
+ppt_vars <- c("intensity", "ugi", "meanPptDay_anomaly")
 static_vars <- c("sand", "slope", "wriTCFrac")
 
-# Map over yearly vars to generate mean raster layers
+mean_ppt <- map(dynamic_covariates, function(r) r$precipitation) %>% 
+  rast() %>%
+  mean()
 
-dynamic_vars_mean <- map(dynamic_vars, function(name) {
-  message("Layer: ", name)
-  var_all_years <- map(dynamic_covariates, function(r) {
-    r[[name]]
-  })
-  
-  var_mean <- var_all_years %>%
-    rast() %>%
-    mean()
-  
-  names(var_mean) <- name
-  
-  var_mean
-}) %>% rast()
+mean_ppt_day <- map(ppt_covariates_crop, function(r) r$meanPptDay) %>% 
+  rast() %>%
+  mean()
 
-ppt_vars_mean <- map(ppt_vars, function(name) {
-  message("Layer: ", name)
-  var_all_years <- map(ppt_covariates, function(r) {
-    r[[name]]
-  })
+# Map over years to generate annual layers with all data and convert to df
+
+vars_annual <- map(years, function(y) {
   
-  var_mean <- var_all_years %>%
-    rast() %>%
-    mean()
+  message("Extracting variables for year ", y)
+  dynamic_year <- dynamic_covariates[[y]]
+  ppt_year <- ppt_covariates_crop[[y]]
   
-  names(var_mean) <- name
+  ppt_anomaly <- dynamic_year$precipitation / mean_ppt
+  mean_ppt_day_anomaly <- ppt_year$meanPptDay - mean_ppt_day
   
-  var_mean
-}) %>% rast()
+  names(ppt_anomaly) <- "ppt_anomaly"
+  names(mean_ppt_day_anomaly) <- "meanPptDay_anomaly"
+  
+  dynamic_year_all <- c(dynamic_year, ppt_year, ppt_anomaly, mean_ppt_day_anomaly)
+  
+  dynamic_year_subset <- subset(dynamic_year_all, c(dynamic_vars, ppt_vars))
+  
+  static_subset <- subset(static_covariates_crop, static_vars)
+  
+  c(dynamic_year_subset, static_subset)
+})
 
+names(vars_annual) <- years
 
-# Combine with selected static covariates
-static_vars_rast <- static_covariates[[static_vars]]
-
-ppt_vars_crop <- crop(ppt_vars_mean, dynamic_vars_mean)
-static_vars_crop <- crop(static_vars_rast, dynamic_vars_mean)
-
-combined_rast <- c(dynamic_vars_mean, ppt_vars_crop, static_vars_crop)
 
 # Convert to data.frame
-combined_vars_df <- as.data.frame(combined_rast, xy = TRUE, na.rm = TRUE)
+combined_vars_dfs <- map(years, function(y) {
+  year_raster <- vars_annual[[y]]
+  message("Converting to data.frame: ", y)
+  
+  df <- as.data.frame(year_raster, cell = TRUE, xy = TRUE, na.rm = TRUE)
+  
+  data.table::as.data.table(df)
+})
+
+names(combined_vars_dfs) <- years
+
+write_rds(combined_vars_dfs,
+          here("data", "processed", "rds", "lgs", "combined_dfs.rds"))
 
 ```
 
@@ -138,14 +153,12 @@ of the quantile method and making it less likely that undegraed
 
 ``` {r clustering, eval = FALSE}
 
-# Set up mlr3 tasks
-  
-tsk_lgs <- combined_vars_df %>%
-  select(-x, -y) %>%
-  as_task_clust()
-
 # Function to implement k-means with specified k
-fit_k_means <- function(task, k) {
+fit_k_means <- function(data, k) {
+  
+  task <- data %>%
+    select(-x, -y, -cell, -GPP) %>%
+    as_task_clust()
   
   message("Finding clusters for k = ", k)
   
@@ -176,17 +189,10 @@ fit_k_means <- function(task, k) {
 set.seed(999)
 
 tic()
-sample_points_clustered <- combined_vars_df %>%
-  mutate(clusters_k10 = fit_k_means(tsk_lgs, 10),
-         clusters_k20 = fit_k_means(tsk_lgs, 20),
-         clusters_k50 = fit_k_means(tsk_lgs, 50),
-         clusters_k100 = fit_k_means(tsk_lgs, 100)) %>%
-  pivot_longer(cols = starts_with("clusters"),
-              names_to = "k", values_to = "cluster") %>%
-  mutate(k = substring(k, 11) %>% as.numeric())
+annual_clusters_k100 <- map(combined_vars_dfs, fit_k_means)
 toc()
 
-write_rds(sample_points_clustered, here("data", "processed", "rds", "clusters_with_ppt.rds"))
+write_rds(annual_clusters_k100, here("data", "processed", "rds", "clusters_annual.rds"))
 
 ```
 
@@ -201,10 +207,23 @@ and for consistency with the RPI method.
 
 ```{r lgs}
 
+annual_clusters_k100 <- read_rds(here("data", "processed", "rds", "clusters_annual.rds"))
+
+sample_points_clustered <- map(years, function(y) {
+  df <- combined_vars_dfs[[y]]
+  clusters <- annual_clusters_k100[[y]]
+  
+  df$cluster <- clusters
+  df$year <- as.numeric(y)
+  
+  df
+}) %>% bind_rows()
+
 # 90th percentile for each cluster
 quantiles <- sample_points_clustered %>%
-  group_by(cluster, k) %>%
-  summarise(potential = quantile(GPP, 0.9)) %>%
+  group_by(cluster) %>%
+  summarise(potential = quantile(GPP, 0.9),
+            mean = mean(GPP)) %>%
   ungroup()
 
 sample_points_quantiles <- left_join(sample_points_clustered, quantiles)
