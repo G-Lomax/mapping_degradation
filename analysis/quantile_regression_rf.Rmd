@@ -64,7 +64,7 @@ ppt_distribution <- st_read(here("data", "raw", "vector", "pptDistributionSample
 ```{r clean, include = FALSE}
 
 yearly_vars <- c("GPP", "precipitation", "tMean", "parMean", "potentialET",
-                 "meanPptDay", "sdii", "ugi")
+                 "meanPptDay", "intensity", "ugi")
 
 sample_points <- sample_points_raw %>%
   mutate(x = st_coordinates(geometry)[,1],
@@ -82,13 +82,16 @@ sample_points <- sample_points_raw %>%
   st_as_sf(coords = c("x", "y"), crs = 4326)
 
 # Calculate derived and normalised variables
+# Convert landform to factor variable
 sample_points_derived <- sample_points %>%
   group_by(index) %>%
   mutate(mean_ppt = mean(precipitation),
          ppt_anomaly = precipitation / mean_ppt,
          mean_meanPptDay = mean(meanPptDay),
-         meanPptDay_anomaly = meanPptDay - mean_meanPptDay) %>%
+         meanPptDay_anomaly = meanPptDay - mean_meanPptDay,
+         landform = factor(landform)) %>%
   ungroup()
+
 
 ```
 
@@ -108,7 +111,7 @@ set.
 
 When defining the learner, we initially choose crude, plausible
 hyperparameters of mtry.ratio = 0.5 and sample.fraction = 0.5. However,
-we set the initial minimum node size to 200 (around 0.1% of the dataset)
+we set the initial minimum node size to 100 (around 0.05% of the dataset)
 to mitigate overfitting and to allow sufficient terminal node size that
 quantiles can be calculated. For our purposes, absolute predictive
 accuracy is less important than retaining enough variability in nodes to
@@ -160,7 +163,7 @@ lrn_ranger_untuned <- lrn("regr.ranger",
                           predict_type = "response",
                           num.trees = 1001,
                           mtry.ratio = 0.5,
-                          min.node.size = 200,
+                          min.node.size = 100,
                           sample.fraction = 0.5
 )
 
@@ -188,7 +191,7 @@ and save the optimum feature set for each.
 
 # Create forward feature selection with untuned model, minimising rmse
 
-perf_msr <- msr("regr.rmse")
+perf_msr <- msr("regr.mae")
 
 fs_method <- fs("sequential", min_features = 1)
 
@@ -210,22 +213,22 @@ nspt_feature_select <- fsi(
   terminator = fs_term
 )
 
-# # Identify optimal feature set for each resampling strategy and store
-# # Time ~ 10-12 hours
-# 
-# set.seed(123)
-# 
-# tic()
-# progressr::with_progress(
-#   spt_feature_set <- fs_method$optimize(spt_feature_select)
-# )
-# toc()
-# # beep(3)
-# 
-# write_rds(spt_feature_select, here("results", "rds", "spt_feature_selector.rds"))
-# write_rds(spt_feature_set, here("results", "rds", "spt_features.rds"))
-# rm(spt_feature_select, spt_feature_set)
-# gc()
+# Identify optimal feature set for each resampling strategy and store
+# Time ~ 10-12 hours
+
+set.seed(123)
+
+tic()
+progressr::with_progress(
+  spt_feature_set <- fs_method$optimize(spt_feature_select)
+)
+toc()
+# beep(3)
+
+write_rds(spt_feature_select, here("results", "rds", "spt_feature_selector_1000.rds"))
+write_rds(spt_feature_set, here("results", "rds", "spt_features_1000.rds"))
+rm(spt_feature_select, spt_feature_set)
+gc()
 
 # set.seed(456)
 # tic()
@@ -259,20 +262,20 @@ worried about perfection!
 ```{r rf_tuning_prep, include = FALSE}
 
 # Load feature sets and compare best performance
-spt_feature_set <- read_rds(here("results", "rds", "spt_features.rds"))
-nspt_feature_set <- read_rds(here("results", "rds", "nspt_features.rds"))
-spt_feature_select <- read_rds(here("results", "rds", "spt_feature_selector.rds"))
-nspt_feature_select <- read_rds(here("results", "rds", "nspt_feature_selector.rds"))
+spt_feature_set <- read_rds(here("results", "rds", "spt_features_1000.rds"))
+# nspt_feature_set <- read_rds(here("results", "rds", "nspt_features.rds"))
+spt_feature_select <- read_rds(here("results", "rds", "spt_feature_selector_1000.rds"))
+# nspt_feature_select <- read_rds(here("results", "rds", "nspt_feature_selector.rds"))
 
 spt_feature_set
-nspt_feature_set
+# nspt_feature_set
 
 # Create new tasks using features selected above
 task_gpp_spt <- task_gpp$clone()
 task_gpp_spt$select(unlist(spt_feature_set$features))
 
-task_gpp_nspt <- task_gpp$clone()
-task_gpp_nspt$select(unlist(nspt_feature_set$features))
+# task_gpp_nspt <- task_gpp$clone()
+# task_gpp_nspt$select(unlist(nspt_feature_set$features))
 
 # Define new learners for tuning
 
@@ -284,24 +287,24 @@ lrn_ranger_tuned_spt <- lrn(
   importance = "permutation",
   num.trees = 1001,
   mtry.ratio = to_tune(p_dbl(0, 1)),
-  min.node.size = to_tune(p_int(200, 20000, logscale = TRUE)),
+  min.node.size = to_tune(p_int(100, 10000, logscale = TRUE)),
   sample.fraction = to_tune(p_dbl(0.1, 0.9))
 )
 
-lrn_ranger_tuned_nspt <- lrn(
-  "regr.ranger", 
-  predict_type = "response",
-  quantreg = TRUE,
-  keep.inbag = TRUE,
-  importance = "permutation",
-  num.trees = 1001,
-  mtry.ratio = to_tune(p_dbl(0, 1)),
-  min.node.size = to_tune(p_int(200, 20000, logscale = TRUE)),
-  sample.fraction = to_tune(p_dbl(0.1, 0.9))
-)
+# lrn_ranger_tuned_nspt <- lrn(
+#   "regr.ranger", 
+#   predict_type = "response",
+#   quantreg = TRUE,
+#   keep.inbag = TRUE,
+#   importance = "permutation",
+#   num.trees = 1001,
+#   mtry.ratio = to_tune(p_dbl(0, 1)),
+#   min.node.size = to_tune(p_int(100, 10000, logscale = TRUE)),
+#   sample.fraction = to_tune(p_dbl(0.1, 0.9))
+# )
 
 set_threads(lrn_ranger_tuned_spt, 2)
-set_threads(lrn_ranger_tuned_nspt, 2)
+# set_threads(lrn_ranger_tuned_nspt, 2)
 
 # Define auto-tuner objects for each model
 
@@ -317,13 +320,13 @@ at_spt <- auto_tuner(
   term_evals = 25
 )
 
-at_nspt <- auto_tuner(
-  tuner = random_tuner,
-  learner = lrn_ranger_tuned_nspt,
-  resampling = nspt_cv_plan,
-  measure = perf_msr,
-  term_evals = 25
-)
+# at_nspt <- auto_tuner(
+#   tuner = random_tuner,
+#   learner = lrn_ranger_tuned_nspt,
+#   resampling = nspt_cv_plan,
+#   measure = perf_msr,
+#   term_evals = 25
+# )
 
 ```
 
@@ -339,7 +342,7 @@ rf_tuned_spt <- at_spt$train(task_gpp_spt)
 toc()
 # beep(3)
 
-write_rds(rf_tuned_spt, here("results", "rds", "rf_tuned_spt.rds"))
+write_rds(rf_tuned_spt, here("results", "rds", "rf_tuned_spt_100.rds"))
 
 # rm(rf_tuned_spt)
 # gc()

@@ -66,7 +66,7 @@ names(ppt_covariates) <- years
 
 # Fitted models
 
-spt_model_tuned <- read_rds(here("results", "rds", "rf_tuned_spt.rds"))
+spt_model_tuned <- read_rds(here("results", "rds", "rf_tuned_spt_100.rds"))
 model <- spt_model_tuned$learner$model
 
 ```
