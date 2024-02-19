@@ -4,7 +4,7 @@ output: html_notebook
 author: Guy Lomax
 date: 2024-01-12
 editor_options: 
-  chunk_output_type: console
+  chunk_output_type: inline
 ---
 
 This notebook compares the results of the RPI methodology with those of RUE,
@@ -27,8 +27,10 @@ library(tmap)
 ke_tz <- st_read(here("data", "raw", "vector", "kenya_tanzania.geojson"))
 
 # Potential and actual GPP values from RPI model
+rpi_paths <- Sys.glob(here("data", "processed", "raster", "rpi", "rf_rpi_20*.tif"))
+
 potential_gpp_all <- rpi_paths %>%
-  map(function(path) rast(path) %>% subset("fitted")) %>%
+  map(function(path) rast(path) %>% subset("quantile_pred")) %>%
   rast()
 names(potential_gpp_all) <- paste0("potential_", 2000:2018)
 
@@ -37,8 +39,12 @@ actual_gpp_all <- rpi_paths %>%
   rast()
 names(actual_gpp_all) <- paste0("actual_", 2000:2018)
 
+mean_gpp_all <- rpi_paths %>%
+  map(function(path) rast(path) %>% subset("mean_pred")) %>%
+  rast()
+names(mean_gpp_all) <- paste0("mean_pred_", 2000:2018)
+
 # RPI layers and trend
-rpi_paths <- Sys.glob(here("data", "processed", "raster", "rpi", "rf_rpi_rast_20*.tif"))
 
 rpi_all <- rpi_paths %>%
   map(function(path) rast(path) %>% subset("rpi")) %>%
@@ -46,18 +52,36 @@ rpi_all <- rpi_paths %>%
 names(rpi_all) <- paste0("rpi_", 2000:2018)
 
 rpi_ts_trend <- rast(here("data", "processed", "raster", "rpi", "rf_rpi_ts_trend.tif"))
+rpi_kendall <- rast(here("data", "processed", "raster", "rpi", "rf_rpi_kendall_tau_rast.tif"))
 
 # RUE layers and trend
 rue_all <- rast(here("data", "processed", "raster", "rue", "rue_all.tif"))
 rue_ts_trend <- rast(here("data", "processed", "raster", "rue", "rue_trend.tif"))
+rue_kendall <- rast(here("data", "processed", "raster", "rue", "rue_trend_kendall.tif"))
+
+names(rue_all) <- paste0("rue_", 2000:2018)
 
 # RESTREND residuals and trend
-restrend_residuals <- rast(here("data", "processed", "raster", "restrend", "restrend_resids.tif"))[5:23]
+restrend_residuals <- rast(here("data", "processed", "raster", "restrend", "restrend_resids.tif"))[[5:23]]
 restrend <- rast(here("data", "processed", "raster", "restrend", "restrend_results.tif"))
+restrend_kendall <- rast(here("data", "processed", "raster", "restrend", "restrend_kendall.tif"))
+restrend_slope <- rast(here("data", "processed", "raster", "restrend", "restrend_resids.tif"))[[1:4]]
 
 names(restrend_residuals) <- paste0("restrend_resids_", 2000:2018)
-names(restrend) <- c("model_yint", "model_slope", "model_rsq", "model_p_value",
-                     "resid_slope", "resid_rsq", "resid_p_value")
+# names(restrend) <- c("model_yint", "model_slope", "model_rsq", "model_p_value",
+#                      "resid_slope", "resid_rsq", "resid_p_value")
+
+# LGS layers
+lgs_annual_paths <- Sys.glob(here("data", "processed", "raster", "lgs", "lgs_annual_*.tif"))
+lgs_potential_gpp_all <- lgs_annual_paths %>%
+  map(function(path) rast(path) %>% subset("potential")) %>%
+  rast()
+names(lgs_potential_gpp_all) <- paste0("lgs_potential_", 2000:2018)
+
+lgs_mean_gpp_all <- lgs_annual_paths %>%
+  map(function(path) rast(path) %>% subset("mean")) %>%
+  rast()
+
 
 # Key covariates for comparison/exploration of results
 dynamic_covariate_paths <- Sys.glob(here("data", "raw", "raster", "covariateMaps", "dynamicVars*.tif"))
@@ -70,24 +94,400 @@ tMean_all <- dynamic_covariate_paths %>%
 tree_cover <- rast(here("data", "raw", "raster", "covariateMaps", "staticVars.tif")) %>%
   subset("wriTCFrac") %>%
   crop(ppt_all)
-  
+
+years <- 2000:2018
+names(ppt_all) <- paste0("precipitation_", years)
+names(tMean_all) <- paste0("tMean_", years)
 
 ```
 
 
 Now we calculate the R-squared and the weighted mean absolute error per pixel
-for each method. How would that work for RUE? It's basically a linear regression
-with intercept = 0, so I could just calculate the annual difference from the
-expected RUE value each year? 
+for each method.
+
+The weighted mean absolute error is the mean absolute difference between actual and
+predicted GPP for each year in a pixel. Methods with the lowest pixel-wise MAE
+explain the greatest amount of variance as a function of environmental
+covariates. Note that the MAE for pixel-wise methods (RUE and RESTREND) are
+likely to be lower, since the pixel-wise model only needs to explain variance
+over time in each pixel, rather than also explaining spatial variance.
+
+Since the RPI and LGS methods both estimate the 90th percentile of GPP for a
+given combination of covariates, we weight the MAE accordingly: positive errors
+(actual GPP > potential) are weighted at Q, while negative errors are weighted
+at (1-Q). In order to compare equivalently to MAE calculated from RUE and
+RESTREND, we must also scale the weighting factors such that the mean weight
+of any point is 1. The weighting factors must therefore fulfil the following
+conditions:
+
+1. W_1 = (Q / (1 - Q)) * W_2
+2. W_1 * (1 - Q) + W_2 * Q = 1
+
+The solutions to this for Q = 0.9 are W_1 = 5 and W_2 = 5 / 9.
 
 ```{r pixel_wise_error}
 
+# First, calculate the actual GPP anomaly (difference between annual GPP
+# and mean GPP for that pixel)
+
+actual_gpp_anomaly <- actual_gpp_all - mean(actual_gpp_all)
+
 # RUE
 
+rue_mean <- mean(rue_all)
 
+rue_pred <- ppt_all * rue_mean
+
+rue_pred_anomaly <- rue_pred - mean(rue_pred)
+
+gpp_error_rue <- abs(rue_pred_anomaly - actual_gpp_anomaly)
+
+mae_rue <- mean(gpp_error_rue)
+
+# RESTREND
+
+mae_restrend <- mean(abs(restrend_residuals))
+
+# RPI
+
+# gt_weight <- 5
+# lte_weight <- 5 / 9
+
+rpi_gpp_anomaly <- mean_gpp_all - mean(mean_gpp_all)
+
+gpp_error_rpi <- rpi_gpp_anomaly - actual_gpp_anomaly
+
+mae_rpi_anom <- mean(abs(gpp_error_rpi))
+
+# abs_weighted_error_rpi <- app(gpp_error_rpi, function(error) {
+#   weighted_error <- ifelse(error <= 0,
+#                            error * lte_weight,
+#                            error * gt_weight)
+#   abs_weighted_error <- abs(weighted_error)
+# 
+#   abs_weighted_error
+# })
+# 
+# mae_rpi <- mean(abs_weighted_error_rpi)
+
+# Best method per pixel by MAE
+
+best_mae <- which.min(c(mae_rue, mae_restrend, mae_rpi_anom))
+
+```
+
+
+```{r mae_maps}
+
+fill <- tm_shape(ke_tz) +
+  tm_fill("grey95")
+
+borders <- tm_shape(ke_tz) +
+  tm_borders()
+
+mae_raster_map <- tm_raster(
+  col.scale = tm_scale_continuous(
+    limits = c(0, 1000),
+    values = "OrRd",
+    outliers.trunc = c(TRUE, TRUE)
+  ),
+  col.legend = tm_legend(
+    reverse = TRUE,
+    title = expression(
+      atop("GPP MAE",
+           (kg~C~m^-2~y^-1))
+    ),
+    frame = FALSE
+  )
+) +
+  tm_layout(asp = 3/4,
+            frame = FALSE)
+
+rue_mae_map <- fill +
+  tm_shape(mae_rue) +
+  mae_raster_map +
+  borders +
+  tm_title("b) RUE")
+
+restrend_mae_map <- fill +
+  tm_shape(mae_restrend) +
+  mae_raster_map +
+  borders +
+  tm_title("c) RESTREND")
+
+rpi_mae_map <- fill +
+  tm_shape(mae_rpi_anom) +
+  mae_raster_map +
+  borders +
+  tm_title("a) RPI")
+
+best_mae_map <- fill +
+  tm_shape(best_mae) +
+  tm_raster(
+    col.scale = tm_scale_categorical(
+      values = "Set1",
+      levels = c(1,2,3),
+      labels = c("RUE", "RESTREND", "RPI")
+    ),
+    col.legend = tm_legend(title = "",
+                           frame = FALSE)
+  ) +
+  tm_layout(asp = 3/4, frame = FALSE) +
+  tm_title("d) Best method") +
+  borders
+
+rue_mae_map
+restrend_mae_map
+rpi_mae_map
+
+tmap_save(
+  rue_mae_map,
+  here("results", "figures", "rue_annual_mae_map.png"),
+       width = 12, height = 12, units = "cm", dpi = 250
+)
+
+tmap_save(
+  rpi_mae_map,
+  here("results", "figures", "rpi_annual_mae_map.png"),
+       width = 12, height = 12, units = "cm", dpi = 250
+)
+
+tmap_save(
+  restrend_mae_map,
+  here("results", "figures", "restrend_annual_mae_map.png"),
+       width = 12, height = 12, units = "cm", dpi = 250
+)
+
+tmap_save(
+  best_mae_map,
+  here("results", "figures", "best_mae_map.png"),
+       width = 12, height = 12, units = "cm", dpi = 250
+)
 
 
 ```
+
+This is an interesting result! It shows that, in seeking to capture both
+spatial and temporal variation in GPP, the RPI method does not account for
+temporal variations as well as fitting a separate linear regression to each
+pixel. This is not hugely surprising, I suppose, since the pixel-wise approach
+accounts for local soil, topographic and vegetation factors by definition,
+whereas RPI relies on explicitly defining the variables behind spatial variation.
+
+However, this is also what allows RPI to differentiate highly productive from
+less productive areas. The local areas of higher MAE in the RPI map could also
+correspond to areas with anomalously high or low productivity relative to their
+environment.
+
+This all makes me think that MAE is not the appropriate metric, since it
+conflates poor model fit with meaningful spatial anomalies in RPI. What I want
+is something like R-squared, in which I am trying to determine how much of the
+overall *variance* in GPP within a pixel is explained by the model. That way,
+if the RPI values are anomalously high, but don't vary very much, we wouldn't
+see elevated MAE. We would just be comparing the variance in actual GPP with
+variance in predicted GPP.
+
+I'll calculate this next - it might take a bit more work (and would also require
+using the mean, rather than quantile).
+
+In addition, I would like to use LGS to generate annual values and compare these,
+since this is possible. I would keep the same clusters, though, rather than
+allowing them to vary year-on-year. Or should I allow them to vary?
+
+
+```{r pixel_wise_r_sq}
+
+# Total variance in GPP
+actual_gpp_mean <- mean(actual_gpp_all)
+
+actual_gpp_anomaly <- actual_gpp_all - actual_gpp_mean
+
+# Total sum of squares
+actual_gpp_tss <- sum(actual_gpp_anomaly ^ 2)
+
+# RUE
+
+rue_rss <- sum(gpp_error_rue ^ 2)
+
+rue_rsq <- 1 - (rue_rss / actual_gpp_tss)
+
+rue_rsq_lt0 <- rue_rsq < 0
+rue_rsq_lt0 <- mask(rue_rsq_lt0, rue_rsq_lt0, maskvalues = c(0,NA))
+
+# RESTREND
+
+restrend_rss <- sum(restrend_residuals ^ 2)
+
+restrend_rsq <- 1 - (restrend_rss / actual_gpp_tss)
+
+# RPI
+
+rpi_rss <- sum(gpp_error_rpi ^ 2)
+
+rpi_rsq <- 1 - (rpi_rss / actual_gpp_tss)
+
+rpi_rsq_lt0 <- rpi_rsq < 0
+rpi_rsq_lt0 <- mask(rpi_rsq_lt0, rpi_rsq_lt0, maskvalues = c(0, NA))
+
+# Raster of best performing strategy
+
+best_rsq <- which.max(c(rue_rsq, restrend_rsq, rpi_rsq))
+
+
+```
+
+
+
+Visualise R-squared:
+
+```{r pixel_wise_r_sq_viz}
+
+fill <- tm_shape(ke_tz) + 
+  tm_fill("grey95")
+
+borders <- tm_shape(ke_tz) +
+  tm_borders()
+
+rsq_raster_params <- tm_raster(
+    col.scale = tm_scale_continuous(
+      limits = c(0, 0.75),
+      midpoint = 0,
+      values = "PiYG",
+      outliers.trunc = c(TRUE, TRUE)
+    ),
+    col.legend = tm_legend(
+      title = expression(R^2),
+      reverse = TRUE,
+      frame = FALSE
+    )
+  ) 
+
+
+rue_rsq_map <- fill +
+  tm_shape(rue_rsq) +
+  rsq_raster_params +
+  tm_shape(rue_rsq_lt0) +
+  tm_raster(col.scale = tm_scale_categorical(values = "orange4", labels = expression(Negative~R^2)),
+            col.legend = tm_legend(title = "")) +
+  tm_layout(asp = 3/4,
+            frame = FALSE) +
+  borders +
+  tm_title("b) RUE")
+
+rpi_rsq_map <- fill +
+  tm_shape(rpi_rsq) +
+  rsq_raster_params +
+  tm_shape(rpi_rsq_lt0) +
+  tm_raster(col.scale = tm_scale_categorical(values = "orange4", labels = expression(Negative~R^2)),
+            col.legend = tm_legend(title = "", show = FALSE)) +
+  tm_layout(asp = 3/4,
+            frame = FALSE) +
+  borders +
+  tm_title("a) RPI")
+
+restrend_rsq_map <- fill +
+  tm_shape(restrend_rsq) +
+  rsq_raster_params +
+  tm_layout(asp = 3/4,
+            frame = FALSE) +
+  borders +
+  tm_title("c) RESTREND")
+
+# rue_rsq_map
+# restrend_rsq_map
+# rpi_rsq_map
+
+tmap_save(
+  rue_rsq_map,
+  here("results", "figures", "rue_annual_rsq_map.png"),
+  width = 12, height = 12, units = "cm", dpi = 250
+)
+
+tmap_save(
+  rpi_rsq_map,
+  here("results", "figures", "rpi_annual_rsq_map.png"),
+  width = 12, height = 12, units = "cm", dpi = 250
+)
+
+tmap_save(
+  restrend_rsq_map,
+  here("results", "figures", "restrend_annual_rsq_map.png"),
+  width = 12, height = 12, units = "cm", dpi = 250
+)
+
+# Map of best performing strategy
+
+best_method_map <- fill +
+  tm_shape(best_rsq) +
+  tm_raster(
+    col.scale = tm_scale_categorical(
+      values = "Set1",
+      levels = c(1,2,3),
+      labels = c("RUE", "RESTREND", "RPI")
+    ),
+    col.legend = tm_legend(
+      title = "",
+      frame = FALSE
+    )
+  ) +
+  tm_title("d) Best method") +
+  tm_layout(asp = 3/4,
+            frame = FALSE) +
+  borders
+
+tmap_save(
+  best_method_map,
+  here("results", "figures", "best_method_rsq.png"),
+  width = 12, height = 12, units = "cm", dpi = 250
+)
+
+
+# # Diff maps
+# 
+# rpi_rue_rsq_diff_map <- fill +
+#   tm_shape(rpi_rue_diff) +
+#   tm_raster(
+#     col.scale = tm_scale_continuous(
+#       limits = c(-1, 1),
+#       midpoint = 0,
+#       values = "PuOr",
+#       outliers.trunc = c(TRUE, TRUE)
+#     ),
+#     col.legend = tm_legend(
+#       title = "RPI vs RUE\nr-squared",
+#       reverse = TRUE,
+#       width = 10,
+#       height = 30
+#     )
+#   ) +
+#   tm_shape(rpi_rsq_lt0) + tm_raster(palette = "grey50", legend.show = FALSE) +
+#   tm_shape(rue_rsq_lt0) + tm_raster(palette = "grey50", legend.show = FALSE) +
+#   borders
+# 
+# rpi_restrend_rsq_diff_map <- fill +
+#   tm_shape(rpi_restrend_diff) +
+#   tm_raster(
+#     col.scale = tm_scale_continuous(
+#       limits = c(-1, 1),
+#       midpoint = 0,
+#       values = "PuOr",
+#       outliers.trunc = c(TRUE, TRUE)
+#     ),
+#     col.legend = tm_legend(
+#       title = "RPI vs RESTREND\nr-squared",
+#       reverse = TRUE,
+#       width = 10,
+#       height = 30
+#     )
+#   ) +
+#   tm_shape(rpi_rsq_lt0) + tm_raster(palette = "grey50", legend.show = FALSE) +
+#   borders
+# 
+# rpi_rue_rsq_diff_map
+# rpi_restrend_rsq_diff_map
+
+```
+
 
 
 
@@ -104,3 +504,557 @@ For trend, we can assess performance through:
 - Low mean absolute error (weighted?) for each pixel
 - Consistency in Mann-Kendall trend?
 - P-values of Theil-Sen slope or permutation trend?
+
+```{r ppt_correlation}
+
+set.seed(555)
+pixel_sample <- terra::spatSample(ppt_all, 1000,
+                                  na.rm = TRUE, exhaustive = TRUE,
+                                  as.points = TRUE, xy = TRUE)
+
+ppt_sample <- pixel_sample %>%
+  as.data.frame(geom = "XY") %>%
+  pivot_longer(starts_with("X20"), names_to = "year", values_to = "precipitation") %>%
+  mutate(year = as.numeric(substring(year, 2)))
+
+rue_sample <- extract(rue_all, pixel_sample, xy = TRUE) %>%
+  pivot_longer(starts_with("gpp_20"), names_to = "year", values_to = "rue") %>%
+  mutate(year = as.numeric(substring(year, 5)))
+rpi_sample <- extract(rpi_all, pixel_sample) %>%
+  pivot_longer(starts_with("rpi_20"), names_to = "year", values_to = "rpi") %>%
+  mutate(year = as.numeric(substring(year, 5)))
+restrend_sample <- extract(restrend_residuals, pixel_sample) %>%
+  pivot_longer(starts_with("restrend_resids_20"), names_to = "year", values_to = "resids") %>%
+  mutate(year = as.numeric(substring(year, 17)))
+
+# Combine into a single dataframe
+combined_df <- ppt_sample %>%
+  left_join(rue_sample) %>%
+  left_join(rpi_sample, by = c("ID", "year")) %>%
+  left_join(restrend_sample, by = c("ID", "year"))
+
+
+# Calculate correlations and plot
+
+ppt_cor <- combined_df %>%
+  pivot_longer(c(rue, rpi, resids), names_to = "method", values_to = "value") %>%
+  group_by(x, y, method) %>%
+  summarise(cor = cor(precipitation, value)) %>%
+  ungroup()
+
+
+```
+
+```{r ppt_correlation_map}
+
+raster_to_tidy_df <- function(raster, xy = FALSE) {
+  df <- as.data.frame(raster, xy = xy, cells = TRUE)
+  
+  var_name_year <- names(raster)[1]
+  var_name_length <- nchar(var_name_year) - 5
+  var_name <- substring(var_name_year, 1, var_name_length)
+  
+  tidy_df <- df %>%
+    pivot_longer(cols = starts_with(var_name),
+                 names_to = "year",
+                 values_to = var_name) %>%
+    mutate(year = as.numeric(substring(year, var_name_length + 2)))
+  
+  tidy_df
+}
+
+ppt_df <- raster_to_tidy_df(ppt_all, TRUE)
+rue_df <- raster_to_tidy_df(rue_all)
+restrend_df <- raster_to_tidy_df(restrend_residuals)
+rpi_df <- raster_to_tidy_df(rpi_all)
+
+combined_df_all <- ppt_df %>%
+  left_join(rue_df) %>%
+  left_join(restrend_df) %>%
+  left_join(rpi_df)
+
+ppt_cor_all <- combined_df_all %>%
+  pivot_longer(cols = c(rue, restrend_resids, rpi), names_to = "method") %>%
+  group_by(cell, method) %>%
+  summarise(ppt_cor = cor(precipitation, value),
+            x = first(x),
+            y = first(y)) %>%
+  ungroup()
+
+# Histogram of correlations
+
+ppt_cor_hist <- ggplot(ppt_cor_all, aes(x = ppt_cor, fill = method)) +
+  geom_histogram(position = "identity", bins = 50, colour = "grey20", alpha = 0.5) +
+  geom_vline(xintercept = 0, colour = "red", linewidth = 2) +
+  theme_bw() +
+  labs(x = "Correlation with annual\nprecipitation (pixel-wise)",
+       y = "Count",
+       fill = "Method")
+
+ggsave(here("results", "figures", "ppt_correlation_hist.png"),
+       ppt_cor_hist,
+       width = 20, height = 12, units = "cm", dpi = 250)
+
+# Convert back to correlation raster layers
+
+ppt_cor_rast <- ppt_cor_all %>%
+  pivot_wider(id_cols = c(cell, x, y),
+              values_from = ppt_cor,
+              names_from = method) %>%
+  select(x, y, rue, restrend, rpi) %>%
+  rast(crs = crs(rpi_all), extent = ext(rpi_all))
+
+ppt_cor_rast <- ppt_cor_rast[[c("rue", "restrend_resids", "rpi")]]
+
+# Save maps
+
+ppt_cor_params <- tm_raster(
+  col.scale = tm_scale_continuous(
+    limits = c(-1, 1),
+    midpoint = 0,
+    values = "PuOr"
+  ),
+  col.legend = tm_legend(
+    title = "Correlation",
+    frame = FALSE,
+    reverse = TRUE
+  )
+)
+
+map_layout <- tm_layout(
+  asp = 3/4,
+  frame = FALSE
+)
+
+rpi_ppt_cor <- fill +
+  tm_shape(ppt_cor_rast$rpi) +
+  ppt_cor_params +
+  map_layout +
+  borders +
+  tm_title("a) RPI")
+
+rue_ppt_cor <- fill +
+  tm_shape(ppt_cor_rast$rue) +
+  ppt_cor_params +
+  map_layout +
+  borders +
+  tm_title("b) RUE")
+
+restrend_ppt_cor <- fill +
+  tm_shape(ppt_cor_rast$restrend_resids) +
+  ppt_cor_params +
+  map_layout +
+  borders +
+  tm_title("c) RESTREND")
+
+best_cor <- which.min(abs(ppt_cor_rast))
+
+best_ppt_cor <- fill +
+  tm_shape(best_cor) +
+  tm_raster(
+    col.scale = tm_scale_categorical(
+      values = "Set2",
+      levels = c(1,2,3),
+      labels = c("RUE", "RESTREND", "RPI")
+    ),
+    col.legend = tm_legend(
+      title = "",
+      frame = FALSE
+    )
+  ) +
+  map_layout +
+  borders +
+  tm_title("d) Best")
+
+tmap_save(
+  rpi_ppt_cor,
+  here("results", "figures", "rpi_ppt_cor.png"),
+  width = 12, height = 12, units = "cm", dpi = 250
+)
+
+tmap_save(
+  rue_ppt_cor,
+  here("results", "figures", "rue_ppt_cor.png"),
+  width = 12, height = 12, units = "cm", dpi = 250
+)
+
+tmap_save(
+  restrend_ppt_cor,
+  here("results", "figures", "restrend_ppt_cor.png"),
+  width = 12, height = 12, units = "cm", dpi = 250
+)
+
+tmap_save(
+  best_ppt_cor,
+  here("results", "figures", "best_ppt_cor.png"),
+  width = 12, height = 12, units = "cm", dpi = 250
+)
+
+```
+
+```{r fit_histograms}
+
+indices <- c("RUE", "RESTREND", "RPI")
+
+# R-squared
+combined_rsq <- c(rue_rsq, restrend_rsq, rpi_rsq)
+
+names(combined_rsq) <- indices
+
+rsq_df <- as.data.frame(combined_rsq, na.rm = T)
+
+rsq_hist <- rsq_df %>%
+  pivot_longer(cols = all_of(indices),
+               names_to = "method", values_to = "rsq") %>%
+  mutate(method = ordered(method, levels = c("RUE", "RESTREND", "RPI"))) %>%
+  ggplot(aes(x = rsq, fill = method)) +
+  geom_density(position = "identity", alpha = 0.5, colour = "grey30") +
+  geom_vline(xintercept = 0) +
+  theme_bw() +
+  scale_fill_brewer(palette = "Set2") +
+  xlim(-2, 1) +
+  labs(x = expression("Pixel-wise"~R^2),
+       y = "Density",
+       fill = "Method")
+
+# MAE
+
+combined_mae <- c(mae_rue, mae_restrend, mae_rpi_anom)
+names(combined_mae) <- indices
+
+mae_df <- as.data.frame(combined_mae, na.rm = T)
+
+mae_hist <- mae_df %>%
+  pivot_longer(cols = all_of(indices),
+               names_to = "method", values_to = "mae") %>%
+  mutate(method = ordered(method, levels = c("RUE", "RESTREND", "RPI"))) %>%
+  ggplot(aes(x = mae, fill = method)) +
+  geom_density(position = "identity", alpha = 0.5, colour = "grey30") +
+  # geom_vline(xintercept = 0) +
+  theme_bw() +
+  scale_fill_brewer(palette = "Set2") +
+  xlim(0, 1500) +
+  labs(x = "Mean absolute error",
+       y = "Density",
+       fill = "Method")
+
+
+# Save plots
+
+ggsave(
+  here("results", "figures", "rsq_hist.png"),
+  rsq_hist,
+  width = 16, height = 12, units = "cm", dpi = 250
+)
+
+ggsave(
+  here("results", "figures", "mae_hist.png"),
+  mae_hist,
+  width = 16, height = 12, units = "cm", dpi = 250
+)
+
+```
+
+
+
+Now to actually plot the trends of the three time series methods:
+
+```{r ts_trend}
+
+# Basemaps
+
+fill <- tm_shape(ke_tz) +
+  tm_fill("grey95")
+
+borders <- tm_shape(ke_tz) +
+  tm_borders()
+
+map_layout <- tm_layout(
+  asp = 3/4,
+  frame = FALSE
+)
+
+# Theil-Sen maps
+
+create_ts_trend_map <- function(trend_raster, palette) {
+  quantiles <- quantile(values(trend_raster), c(0.01, 0.99), na.rm = T)
+  
+  tm_shape(trend_raster) +
+  tm_raster(
+    col.scale = tm_scale_continuous(
+      limits = quantiles,
+      midpoint = 0,
+      values = palette,
+      outliers.trunc = c(TRUE, TRUE)
+    ),
+    col.legend = tm_legend(
+      title = "Slope",
+      reverse = TRUE,
+      frame = TRUE
+    )
+  )
+}
+
+rue_ts_map <- fill +
+  create_ts_trend_map(rue_ts_trend[[1]], "PuOr") +
+  borders +
+  map_layout +
+  tm_title("b) RUE")
+
+rpi_ts_map <- fill +
+  create_ts_trend_map(rpi_ts_trend[[1]], "PuOr") +
+  borders +
+  map_layout +
+  tm_title("a) RPI")
+
+restrend_ts_map <- fill +
+  create_ts_trend_map(restrend[[1]], "PuOr") +
+  borders +
+  map_layout +
+  tm_title("c) RESTREND")
+
+
+tmap_save(rue_ts_map,
+          here("results", "figures", "rue_ts_map.png"),
+          width = 12, height = 12, units = "cm", dpi = 250)
+tmap_save(rpi_ts_map,
+          here("results", "figures", "rpi_ts_map.png"),
+          width = 12, height = 12, units = "cm", dpi = 250)
+tmap_save(restrend_ts_map,
+          here("results", "figures", "restrend_ts_map.png"),
+          width = 12, height = 12, units = "cm", dpi = 250)
+
+
+
+# Kendall Tau maps
+
+kendall_tau_params <- tm_raster(
+  col.scale = tm_scale_continuous(
+    limits = c(-0.5, 0.5),
+    midpoint = 0,
+    values = "PuOr",
+    outliers.trunc = c(TRUE, TRUE)
+  ),
+  col.legend = tm_legend(
+    reverse = TRUE,
+    title = "Kendall tau",
+    frame = FALSE
+  )
+)
+
+rue_kendall_map <- fill +
+  tm_shape(rue_kendall[[1]]) +
+  kendall_tau_params +
+  borders +
+  map_layout +
+  tm_title("b) RUE")
+
+rpi_kendall_map <- fill +
+  tm_shape(rpi_kendall[[1]]) +
+  kendall_tau_params +
+  borders +
+  map_layout +
+  tm_title("a) RPI")
+
+restrend_kendall_map <- fill +
+  tm_shape(restrend_kendall[[1]]) +
+  kendall_tau_params +
+  borders +
+  map_layout +
+  tm_title("c) RESTREND")
+
+
+tmap_save(rue_kendall_map,
+          here("results", "figures", "rue_kendall_map.png"),
+          width = 12, height = 12, units = "cm", dpi = 250)
+tmap_save(rpi_kendall_map,
+          here("results", "figures", "rpi_kendall_map.png"),
+          width = 12, height = 12, units = "cm", dpi = 250)
+tmap_save(restrend_kendall_map,
+          here("results", "figures", "restrend_kendall_map.png"),
+          width = 12, height = 12, units = "cm", dpi = 250)
+
+# Kendall tau histogram
+
+kendall_tau_all <- c(rue_kendall[[1]], restrend_kendall[[1]], rpi_kendall[[1]])
+names(kendall_tau_all) <- c("RUE", "RESTREND", "RPI")
+kendall_tau_df <- as.data.frame(kendall_tau_all, na.rm = T, cell = T)
+
+kendall_tau_plot <- kendall_tau_df %>%
+  pivot_longer(cols = -"cell", names_to = "metric", values_to = "kendall_tau") %>%
+  mutate(metric = ordered(metric, levels = c("RUE", "RESTREND", "RPI"))) %>%
+  ggplot(aes(x = kendall_tau, fill = metric)) +
+  geom_density(colour = "grey30", alpha = 0.6) +
+  geom_vline(xintercept = 0) +
+  scale_fill_brewer(palette = "Set2") +
+  theme_bw() +
+  labs(x = "Kendall Tau",
+       y = "Density",
+       fill = "Metric") +
+  theme(legend.position = "bottom")
+
+# Mean, median and SD values per index
+
+kendall_metrics <- kendall_tau_df %>%
+  pivot_longer(cols = -"cell", names_to = "metric", values_to = "kendall_tau") %>%
+  group_by(metric) %>%
+  summarise(mean = mean(kendall_tau),
+            median = median(kendall_tau),
+            sd = sd(kendall_tau))
+  
+
+# Pixels with opposite trends in RPI and RESTREND
+
+
+
+
+```
+
+
+
+
+```{r trend_scatter_plots}
+
+options(scipen = 999)
+
+set.seed(121)
+rpi_trend_sample <- spatSample(rpi_ts_trend$slope, 4000, na.rm = TRUE, exhaustive = TRUE, as.points = TRUE)
+
+rue_trend_sample <- extract(rue_ts_trend$rue_slope, rpi_trend_sample)
+restrend_sample <- extract(restrend$resid_slope, rpi_trend_sample)
+mean_ppt_sample <- ppt_all %>%
+  mean() %>%
+  extract(rpi_trend_sample)
+
+trend_sample_all <- rpi_trend_sample %>%
+  as.data.frame(geom = "XY") %>%
+  bind_cols(rue_trend_sample, restrend_sample, mean_ppt_sample) %>%
+  select(-starts_with("ID")) %>%
+  rename(precipitation = mean) %>%
+  mutate(ppt_bin = cut_width(precipitation, 200, boundary = 0))
+
+bins <- levels(trend_sample_all$ppt_bin)
+
+trend_sample_subset <- filter(trend_sample_all, ppt_bin %in% bins[1:6])
+
+rpi_rue_plot <- ggplot(trend_sample_subset, aes(x = slope, y = rue_slope)) +
+  geom_point(size = 0.5) +
+  xlim(-0.03, 0.03) +
+  ylim(-0.2, 0.2) +
+  geom_hline(yintercept = 0) +
+  geom_vline(xintercept = 0) +
+  facet_wrap(~ppt_bin) +
+  theme_bw() +
+  labs(x = "RPI", y = "RUE")
+
+rpi_restrend_plot <- ggplot(trend_sample_subset, aes(x = slope, y = resid_slope)) +
+  geom_point(size = 0.5) +
+  xlim(-0.03, 0.03) +
+  # ylim(-0.2, 0.2) +
+  geom_hline(yintercept = 0) +
+  geom_vline(xintercept = 0) +
+  facet_wrap(~ppt_bin) +
+  theme_bw() +
+  labs(x = "RPI", y = "RESTREND")
+
+rpi_rue_plot
+rpi_restrend_plot
+
+```
+
+
+
+```{r facet_maps_rpi}
+
+names(rpi_all) <- years
+
+rpi_annual_map <- fill +
+  tm_shape(rpi_all[[2:19]]) +
+  tm_raster(
+    col.scale = tm_scale_continuous(
+      limits = c(0.2, 1.2),
+      midpoint = 0.7,
+      values = "viridis",
+      outliers.trunc = c(TRUE, TRUE)
+    ),
+    col.legend = tm_legend(show = FALSE)
+  ) +
+  borders +
+  tm_layout(asp = 3/4, frame = FALSE,
+            panel.label.bg.color = "white",
+            panel.label.size = 10) +
+  tm_facets_wrap(nrows = 3, ncols = 6)
+
+rpi_map_legend <- tm_shape(rpi_all[[2]]) +
+  tm_raster(
+    col.scale = tm_scale_continuous(
+      limits = c(0.2, 1.2),
+      midpoint = 0.7,
+      values = "viridis",
+      values.range = c(0,1),
+      outliers.trunc = c(TRUE, TRUE)
+    ),
+    col.legend = tm_legend(
+      title = "RPI",
+      reverse = TRUE,
+      frame = FALSE
+    ),
+  ) +
+  tm_layout(legend.only = TRUE)
+
+tmap_save(
+  rpi_annual_map,
+  here("results", "figures", "rpi_annual_map.png"),
+  width = 30, height = 20, units = "cm", dpi = 250
+)
+
+tmap_save(
+  rpi_map_legend,
+  here("results", "figures", "rpi_map_legend.png"),
+  width = 3, height = 6, units = "cm", dpi = 250
+)
+
+```
+
+
+```{r rue_new}
+
+gpp_ppt <- c(actual_gpp_all, ppt_all)
+
+rue_lm <- app(gpp_ppt, function(x) {
+  if (any(is.na(x))) {
+    c(NA, NA)
+  } else {
+    gpp_x <- x[1:19]
+    ppt_x <- x[20:38]
+    
+    mod <- lm(gpp_x ~ 0 + ppt_x)
+    
+    slope <- coef(mod)[1]
+    
+    rsq <- broom::glance(mod)$r.squared
+    
+    c(slope, rsq)
+  }
+})
+
+writeRaster(rue_lm,
+            here("data", "processed", "raster", "rue", "rue_lm.tif"))
+
+```
+
+
+
+```{r rue_new_test}
+
+rue_lm <- rast(here("data", "processed", "raster", "rue", "rue_lm.tif"))
+
+plot(rue_lm)
+
+rue_resids <- actual_gpp_all - (rue_lm * ppt_all)
+
+
+
+
+```
+

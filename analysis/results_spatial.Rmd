@@ -26,41 +26,147 @@ library(tmap)
 # Country polygons
 ke_tz <- st_read(here("data", "raw", "vector", "kenya_tanzania.geojson"))
 
+# Actual GPP mean
+rpi_paths <- Sys.glob(here("data", "processed", "raster", "rpi", "rf_rpi_100_20*.tif"))
+
+potential_gpp_mean <- rpi_paths %>%
+  map(function(path) rast(path) %>% subset("quantile_pred")) %>%
+  rast() %>%
+  mean()
+
+actual_gpp_mean <- rpi_paths %>%
+  map(function(path) rast(path) %>% subset("GPP")) %>%
+  rast() %>%
+  mean()
+
+predicted_gpp_rpi <- rpi_paths %>%
+  map(function(path) rast(path) %>% subset("mean_pred")) %>%
+  rast() %>%
+  mean()
+
 # RPI mean and trend
 rpi_mean <- rast(here("data", "processed", "raster", "rpi", "rpi_mean.tif"))
-# rpi_ts_trend <- rast(here("data", "processed", "raster", "rpi", "rf_rpi_ts_trend.tif"))
 
 # RUE mean and trend
 rue_mean <- rast(here("data", "processed", "raster", "rue", "rue_mean.tif"))
-# rue_ts_trend <- rast(here("data", "processed", "raster", "rue", "rue_trend.tif"))
-
-# RESTREND trend
-restrend <- rast(here("data", "processed", "raster", "restrend", "restrend_results.tif"))
 
 # LGS mean
-lgs_100 <- rast(here("data", "processed", "raster", "lgs", "lgs_rast_100.tif"))
-lgs_50 <- rast(here("data", "processed", "raster", "lgs", "lgs_rast_50.tif"))
-lgs_20 <- rast(here("data", "processed", "raster", "lgs", "lgs_rast_20.tif"))
+
+lgs_k <- c(20, 50, 100, 200, 500, 1000)
+lgs_paths <- Sys.glob(here("data", "processed", "raster", "lgs", "lgs_subset_*.tif"))
+
+lgs_layers <- lgs_paths %>%
+  map(rast)
+names(lgs_layers) <- lgs_k
+
+lgs_50 <- lgs_layers[["50"]]
+lgs_100 <- lgs_layers[["100"]]
+lgs_200 <- lgs_layers[["200"]]
+lgs_1000 <- lgs_layers[["1000"]]
 
 # Key covariates for comparison/exploration of results
 dynamic_covariate_paths <- Sys.glob(here("data", "raw", "raster", "covariateMaps", "dynamicVars*.tif"))
-ppt_mean <- dynamic_covariate_paths %>%
+
+years <- 2000:2018
+ppt_all <- dynamic_covariate_paths %>%
   map(function(path) rast(path) %>% subset("precipitation")) %>%
-  rast() %>%
-  mean()
-t_mean <- dynamic_covariate_paths %>%
+  rast()
+t_mean_all <- dynamic_covariate_paths %>%
   map(function(path) rast(path) %>% subset("tMean")) %>%
-  rast() %>%
-  mean()
+  rast()
 tree_cover <- rast(here("data", "raw", "raster", "covariateMaps", "staticVars.tif")) %>%
   subset("wriTCFrac") %>%
-  crop(ppt_mean)
+  crop(ppt_all)
 
+names(ppt_all) <- paste0("ppt_", years)
+names(t_mean_all) <- paste0("tMean_", years)
+names(tree_cover) <- "tree_cover"
+
+ppt_mean <- mean(ppt_all)
+t_mean <- mean(t_mean_all)
 covariates <- c(ppt_mean, t_mean, tree_cover)
 names(covariates) <- c("ppt_mean", "t_mean", "tree_cover")
-  
+
 
 ```
+
+
+We can estimate the usefulness of each method in comparing spatial patterns
+by quantifying how much of the spatial variation in GPP it is able to explain
+using environmental variation. For RUE this is extremely crude, but for the
+others it is more meaningful.
+
+```{r spatial_variance_explained}
+
+mean_gpp_value <- mean(values(actual_gpp_mean), na.rm = T)
+
+tss_gpp <- (actual_gpp_mean - mean_gpp_value) ^ 2 %>%
+  values() %>%
+  sum(na.rm = TRUE)
+
+# RUE
+
+median_rue <- median(values(rue_mean), na.rm = T)
+mean_rue <- mean(values(rue_mean), na.rm = T)
+
+predicted_gpp_rue <- median_rue * mean(ppt_all)
+
+abs_error_rue <- abs(actual_gpp_mean - predicted_gpp_rue)
+
+mae_rue <- mean(values(abs_error_rue), na.rm = TRUE)
+
+rss_gpp_rue <- (actual_gpp_mean - predicted_gpp_rue) ^ 2 %>%
+  values() %>%
+  sum(na.rm = TRUE)
+
+rsq_rue <- 1 - (rss_gpp_rue / tss_gpp)
+
+# LGS
+
+gt_weight <- 5
+lte_weight <- 5 / 9
+
+error_lgs <- actual_gpp_mean - lgs_1000$potential
+
+weighted_abs_error_lgs <- ifel(error_lgs > 0,
+                               error_lgs * gt_weight,
+                               error_lgs * lte_weight) %>%
+  abs()
+
+maew_lgs <- mean(values(weighted_abs_error_lgs), na.rm = T)
+
+mae_lgs <- mean(values(abs(actual_gpp_mean - lgs_1000$mean)), na.rm = T)
+
+
+rss_gpp_lgs <- (actual_gpp_mean - lgs_1000$mean) ^ 2 %>%
+  values() %>%
+  sum(na.rm = T)
+
+rsq_lgs <- 1 - (rss_gpp_lgs / tss_gpp)
+
+# RPI
+
+error_rpi <- actual_gpp_mean - potential_gpp_mean
+
+weighted_abs_error_rpi <- ifel(error_rpi > 0,
+                               error_rpi * gt_weight,
+                               error_rpi * lte_weight) %>%
+  abs()
+
+maew_rpi <- mean(values(weighted_abs_error_rpi), na.rm = T)
+
+mae_rpi <- mean(values(abs(actual_gpp_mean - predicted_gpp_rpi)), na.rm = T)
+
+rss_gpp_rpi <- (actual_gpp_mean - predicted_gpp_rpi) ^ 2 %>%
+  values() %>%
+  sum(na.rm = TRUE)
+
+rsq_rpi <- 1 - (rss_gpp_rpi / tss_gpp)
+
+```
+
+
+
 
 
 First, we can simply plot comparative maps of the results from the different
@@ -83,113 +189,256 @@ rpi_mean_map <- fill +
   tm_raster(
     col.scale = tm_scale_continuous(
       limits = c(0.3, 1),
-      midpoint = 0.65,
-      values = "RdBu",
+      values = "YlGnBu",
       outliers.trunc = c(T,T)
     ),
     col.legend = tm_legend(
       title = "Mean RPI",
       reverse = TRUE,
-      width = 10,
-      height = 30)
+      frame = FALSE)
   ) +
+  tm_layout(asp = 3/4,
+            frame = FALSE) +
+  tm_title("a) RPI") +
   borders
 
 rue_mean_map <- fill +
   tm_shape(rue_mean) +
   tm_raster(
     col.scale = tm_scale_continuous(
-      limits = c(0, 7),
-      midpoint = 3,
-      values = "RdBu",
+      limits = c(1, 7),
+      values = "YlGnBu",
       outliers.trunc = c(T,T)
     ),
     col.legend = tm_legend(
       title = "Mean RUE",
       reverse = TRUE,
-      width = 10,
-      height = 30)
+      frame = FALSE)
   ) +
+  tm_layout(asp = 3/4,
+            frame = FALSE) +
+  tm_title("b) RUE") +
   borders
 
-lgs_mean_map <- fill +
+lgs_100_mean_map <- fill +
   tm_shape(lgs_100$lgs_ratio) +
   tm_raster(
     col.scale = tm_scale_continuous(
-      limits = c(0.4, 1.2),
-      midpoint = 0.8,
-      values = "RdBu",
+      limits = c(0.2, 1.4),
+      values = "YlGnBu",
       outliers.trunc = c(T,T)
     ),
     col.legend = tm_legend(
       title = "LGS",
       reverse = TRUE,
-      width = 10,
-      height = 30)
+      frame = FALSE)
   ) +
+  tm_layout(asp = 3/4,
+            frame = FALSE) +
+  tm_title("c) LGS, k = 100") +
   borders
+
+lgs_200_mean_map <- fill +
+  tm_shape(lgs_200$lgs_ratio) +
+  tm_raster(
+    col.scale = tm_scale_continuous(
+      limits = c(0.2, 1.4),
+      values = "YlGnBu",
+      outliers.trunc = c(T,T)
+    ),
+    col.legend = tm_legend(
+      title = "LGS",
+      reverse = TRUE,
+      frame = FALSE)
+  ) +
+  tm_layout(asp = 3/4,
+            frame = FALSE) +
+  tm_title("d) LGS, k = 200") +
+  borders
+
+lgs_1000_mean_map <- fill +
+  tm_shape(lgs_1000$lgs_ratio) +
+  tm_raster(
+    col.scale = tm_scale_continuous(
+      limits = c(0.2, 1.4),
+      values = "YlGnBu",
+      outliers.trunc = c(T,T)
+    ),
+    col.legend = tm_legend(
+      title = "LGS",
+      reverse = TRUE,
+      frame = FALSE)
+  ) +
+  tm_layout(asp = 3/4,
+            frame = FALSE) +
+  tm_title("d) LGS, k = 1000") +
+  borders
+
+# Save maps
+tmap_save(rue_mean_map,
+          here("results", "figures", "rue_mean.png"),
+          width = 12, height = 12, units = "cm", dpi = 250)
+
+tmap_save(rpi_mean_map,
+          here("results", "figures", "rpi_mean.png"),
+          width = 12, height = 12, units = "cm", dpi = 250)
+
+tmap_save(lgs_100_mean_map,
+          here("results", "figures", "lgs_100_mean.png"),
+          width = 12, height = 12, units = "cm", dpi = 250)
+
+tmap_save(lgs_200_mean_map,
+          here("results", "figures", "lgs_200_mean.png"),
+          width = 12, height = 12, units = "cm", dpi = 250)
+
+tmap_save(lgs_1000_mean_map,
+          here("results", "figures", "lgs_1000_mean.png"),
+          width = 12, height = 12, units = "cm", dpi = 250)
+
+# Potential GPP maps for RPI and LGS
+rpi_potential_map <- fill +
+  tm_shape(potential_gpp_mean) +
+  tm_raster(
+    col.scale = tm_scale_continuous(
+      limits = c(750, 5250),
+      midpoint = 3000,
+      values = "YlGn",
+      outliers.trunc = c(TRUE, TRUE)
+    ),
+    col.legend = tm_legend(
+      reverse = TRUE,
+      title = expression(
+        atop("Potential GPP",
+             kg~C~m^-2~y^-1)
+      ),
+      frame = FALSE
+    )
+  ) +
+  borders +
+  tm_layout(asp = 3/4,
+            frame = FALSE) +
+  tm_title("RPI")
+
+lgs_100_potential_map <- fill +
+  tm_shape(lgs_100$potential) +
+  tm_raster(
+    col.scale = tm_scale_continuous(
+      limits = c(750, 5250),
+      midpoint = 3000,
+      values = "YlGn",
+      outliers.trunc = c(TRUE, TRUE)
+    ),
+    col.legend = tm_legend(
+      reverse = TRUE,
+      title = expression(
+        atop("Potential GPP",
+             kg~C~m^-2~y^-1)
+      ),
+      frame = FALSE
+    )
+  ) +
+  borders +
+  tm_layout(asp = 3/4,
+            frame = FALSE) +
+  tm_title("LGS, k = 100")
+
+lgs_1000_potential_map <- fill +
+  tm_shape(lgs_1000$potential) +
+  tm_raster(
+    col.scale = tm_scale_continuous(
+      limits = c(750, 5250),
+      midpoint = 3000,
+      values = "YlGn",
+      outliers.trunc = c(TRUE, TRUE)
+    ),
+    col.legend = tm_legend(
+      reverse = TRUE,
+      title = expression(
+        atop("Potential GPP",
+             kg~C~m^-2~y^-1)
+      ),
+      frame = FALSE
+    )
+  ) +
+  borders +
+  tm_layout(asp = 3/4,
+            frame = FALSE) +
+  tm_title("LGS, k = 1000")
+
+
+tmap_save(rpi_potential_map,
+          here("results", "figures", "rpi_potential_map.png"),
+          width = 12, height = 12, units = "cm", dpi = 250)
+
+tmap_save(lgs_100_potential_map,
+          here("results", "figures", "lgs_100_potential_map.png"),
+          width = 12, height = 12, units = "cm", dpi = 250)
+
+tmap_save(lgs_1000_potential_map,
+          here("results", "figures", "lgs_1000_potential_map.png"),
+          width = 12, height = 12, units = "cm", dpi = 250)
 
 rpi_mean_map
 rue_mean_map
 lgs_mean_map
 
-## Comparative map of RPI vs. LGS (scaled relative to median and 0.1/0.9 quantiles)
-
-# Calculate median and quartiles for each index
-rpi_quantiles <- quantile(values(rpi_mean), c(0.5, 0.25, 0.75), na.rm = TRUE)
-rue_quantiles <- quantile(values(rue_mean), c(0.5, 0.25, 0.75), na.rm = TRUE)
-lgs_quantiles <- quantile(values(lgs_100$lgs_ratio), c(0.5, 0.25, 0.75), na.rm = TRUE)
-
-# Centre values around median and scale by interquartile range
-rpi_mean_scaled <- (rpi_mean - rpi_quantiles[1]) / (rpi_quantiles[3] - rpi_quantiles[2])
-rue_mean_scaled <- (rue_mean - rue_quantiles[1]) / (rue_quantiles[3] - rue_quantiles[2])
-lgs_mean_scaled <- (lgs_100$lgs_ratio - lgs_quantiles[1]) / (lgs_quantiles[3] - lgs_quantiles[2])
-
-# Calculate difference maps between RPI and other indices
-
-rpi_rue_diff <- rpi_mean_scaled - rue_mean_scaled
-rpi_lgs_diff <- rpi_mean_scaled - lgs_mean_scaled
-
-rpi_rue_diff_map <- fill +
-  tm_shape(rpi_rue_diff) +
-  tm_raster(
-    col.scale = tm_scale_continuous(
-      limits = c(-2, 2),
-      midpoint = 0,
-      values = "RdBu",
-      outliers.trunc = c(T,T)
-    ),
-    
-    col.legend = tm_legend(
-      title = "RPI vs. RUE difference",
-      reverse = TRUE,
-      width = 10,
-      height = 30
-    )
-  ) +
-  borders
-
-rpi_lgs_diff_map <- fill +
-  tm_shape(rpi_lgs_diff) +
-  tm_raster(
-    col.scale = tm_scale_continuous(
-      limits = c(-2, 2),
-      midpoint = 0,
-      values = "RdBu",
-      outliers.trunc = c(T,T)
-    ),
-    
-    col.legend = tm_legend(
-      title = "RPI vs. LGS difference",
-      reverse = TRUE,
-      width = 10,
-      height = 30
-    )
-  ) +
-  borders
-
-rpi_rue_diff_map
-rpi_lgs_diff_map
+# ## Comparative map of RPI vs. LGS (scaled relative to median and 0.1/0.9 quantiles)
+# 
+# # Calculate median and quartiles for each index
+# rpi_quantiles <- quantile(values(rpi_mean), c(0.5, 0.25, 0.75), na.rm = TRUE)
+# rue_quantiles <- quantile(values(rue_mean), c(0.5, 0.25, 0.75), na.rm = TRUE)
+# lgs_quantiles <- quantile(values(lgs_100$lgs_ratio), c(0.5, 0.25, 0.75), na.rm = TRUE)
+# 
+# # Centre values around median and scale by interquartile range
+# rpi_mean_scaled <- (rpi_mean - rpi_quantiles[1]) / (rpi_quantiles[3] - rpi_quantiles[2])
+# rue_mean_scaled <- (rue_mean - rue_quantiles[1]) / (rue_quantiles[3] - rue_quantiles[2])
+# lgs_mean_scaled <- (lgs_100$lgs_ratio - lgs_quantiles[1]) / (lgs_quantiles[3] - lgs_quantiles[2])
+# 
+# # Calculate difference maps between RPI and other indices
+# 
+# rpi_rue_diff <- rpi_mean_scaled - rue_mean_scaled
+# rpi_lgs_diff <- rpi_mean_scaled - lgs_mean_scaled
+# 
+# rpi_rue_diff_map <- fill +
+#   tm_shape(rpi_rue_diff) +
+#   tm_raster(
+#     col.scale = tm_scale_continuous(
+#       limits = c(-2, 2),
+#       midpoint = 0,
+#       values = "RdBu",
+#       outliers.trunc = c(T,T)
+#     ),
+#     
+#     col.legend = tm_legend(
+#       title = "RPI vs. RUE difference",
+#       reverse = TRUE,
+#       width = 10,
+#       height = 30
+#     )
+#   ) +
+#   borders
+# 
+# rpi_lgs_diff_map <- fill +
+#   tm_shape(rpi_lgs_diff) +
+#   tm_raster(
+#     col.scale = tm_scale_continuous(
+#       limits = c(-2, 2),
+#       midpoint = 0,
+#       values = "RdBu",
+#       outliers.trunc = c(T,T)
+#     ),
+#     
+#     col.legend = tm_legend(
+#       title = "RPI vs. LGS difference",
+#       reverse = TRUE,
+#       width = 10,
+#       height = 30
+#     )
+#   ) +
+#   borders
+# 
+# rpi_rue_diff_map
+# rpi_lgs_diff_map
 
 
 ```
@@ -289,7 +538,10 @@ mean_rpi_sample <- spatSample(rpi_mean, 2000, as.points = TRUE,
 
 mean_rue_sample <- extract(rue_mean, mean_rpi_sample)
 
-mean_lgs_sample <- extract(lgs_100$lgs_ratio, mean_rpi_sample)
+mean_lgs_100_sample <- extract(lgs_100$lgs_ratio, mean_rpi_sample) %>%
+  rename(lgs_100 = lgs_ratio)
+mean_lgs_1000_sample <- extract(lgs_1000$lgs_ratio, mean_rpi_sample) %>%
+  rename(lgs_1000 = lgs_ratio)
 
 covariate_sample <- extract(covariates, mean_rpi_sample)
 
@@ -298,7 +550,8 @@ spatial_comparison <- mean_rpi_sample %>%
   rename(mean_rpi = mean) %>%
   bind_cols(mean_rue_sample) %>%
   rename(mean_rue = mean) %>%
-  bind_cols(mean_lgs_sample) %>%
+  bind_cols(mean_lgs_100_sample) %>%
+  bind_cols(mean_lgs_1000_sample) %>%
   bind_cols(covariate_sample) %>%
   select(-starts_with("ID"))
 
@@ -308,7 +561,7 @@ ggplot(spatial_comparison, aes(x = mean_rpi, y = mean_rue)) +
   geom_smooth(method = "lm", se = FALSE) +
   theme_bw()
 
-ggplot(spatial_comparison, aes(x = mean_rpi, y = lgs_ratio)) +
+ggplot(spatial_comparison, aes(x = mean_rpi, y = lgs_1000)) +
   geom_point(size = 0.5) +
   geom_smooth(method = "lm", se = FALSE) +
   theme_bw()
@@ -316,11 +569,12 @@ ggplot(spatial_comparison, aes(x = mean_rpi, y = lgs_ratio)) +
 spatial_comparison_valid <- drop_na(spatial_comparison)
 
 cor(spatial_comparison_valid$mean_rpi, spatial_comparison_valid$mean_rue)
-cor(spatial_comparison_valid$mean_rpi, spatial_comparison_valid$lgs_ratio)
+cor(spatial_comparison_valid$mean_rpi, spatial_comparison_valid$lgs_100)
+cor(spatial_comparison_valid$mean_rpi, spatial_comparison_valid$lgs_1000)
 
 # Results relative to mean precipitation
 spatial_comparison %>%
-  pivot_longer(1:3, names_to = "metric", values_to = "value") %>%
+  pivot_longer(1:4, names_to = "metric", values_to = "value") %>%
   ggplot(aes(x = ppt_mean, y = value)) +
   geom_point(size = 0.25) +
   geom_smooth(method = "lm", se = F) +
@@ -331,7 +585,7 @@ spatial_comparison %>%
 
 spatial_comparison %>%
   st_drop_geometry %>%
-  pivot_longer(1:3, names_to = "metric", values_to = "value") %>%
+  pivot_longer(1:4, names_to = "metric", values_to = "value") %>%
   group_by(metric) %>%
   drop_na() %>%
   summarise(cor = cor(ppt_mean, value))
