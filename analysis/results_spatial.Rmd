@@ -8,7 +8,8 @@ editor_options:
 ---
 
 This notebook compares the results of the RPI methodology with those of RUE,
-RESTREND and LGS.
+RESTREND and LGS at identifying persistent differences in multi-annual mean
+productivity.
 
 ```{r setup}
 

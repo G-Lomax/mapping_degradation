@@ -874,35 +874,6 @@ tmap_save(restrend_kendall_map,
           here("results", "figures", "restrend_kendall_map.png"),
           width = 12, height = 12, units = "cm", dpi = 250)
 
-# Kendall tau histogram
-
-kendall_tau_all <- c(rue_kendall[[1]], restrend_kendall[[1]], rpi_kendall[[1]])
-names(kendall_tau_all) <- c("RUE", "RESTREND", "RPI")
-kendall_tau_df <- as.data.frame(kendall_tau_all, na.rm = T, cell = T)
-
-kendall_tau_plot <- kendall_tau_df %>%
-  pivot_longer(cols = -"cell", names_to = "metric", values_to = "kendall_tau") %>%
-  mutate(metric = ordered(metric, levels = c("RUE", "RESTREND", "RPI"))) %>%
-  ggplot(aes(x = kendall_tau, fill = metric)) +
-  geom_density(colour = "grey30", alpha = 0.6) +
-  geom_vline(xintercept = 0) +
-  scale_fill_brewer(palette = "Set2") +
-  theme_bw() +
-  labs(x = "Kendall Tau",
-       y = "Density",
-       fill = "Metric") +
-  theme(legend.position = "bottom")
-
-# Mean, median and SD values per index
-
-kendall_metrics <- kendall_tau_df %>%
-  pivot_longer(cols = -"cell", names_to = "metric", values_to = "kendall_tau") %>%
-  group_by(metric) %>%
-  summarise(mean = mean(kendall_tau),
-            median = median(kendall_tau),
-            sd = sd(kendall_tau))
-  
-
 # Pixels with opposite trends in RPI and RESTREND
 
 
@@ -930,14 +901,16 @@ trend_sample_all <- rpi_trend_sample %>%
   as.data.frame(geom = "XY") %>%
   bind_cols(rue_trend_sample, restrend_sample, mean_ppt_sample) %>%
   select(-starts_with("ID")) %>%
-  rename(precipitation = mean) %>%
+  rename(precipitation = mean,
+         rpi_slope = slope,
+         restrend_slope = resid_slope) %>%
   mutate(ppt_bin = cut_width(precipitation, 200, boundary = 0))
 
 bins <- levels(trend_sample_all$ppt_bin)
 
 trend_sample_subset <- filter(trend_sample_all, ppt_bin %in% bins[1:6])
 
-rpi_rue_plot <- ggplot(trend_sample_subset, aes(x = slope, y = rue_slope)) +
+rpi_rue_plot <- ggplot(trend_sample_subset, aes(x = rpi_slope, y = rue_slope)) +
   geom_point(size = 0.5) +
   xlim(-0.03, 0.03) +
   ylim(-0.2, 0.2) +
@@ -947,8 +920,9 @@ rpi_rue_plot <- ggplot(trend_sample_subset, aes(x = slope, y = rue_slope)) +
   theme_bw() +
   labs(x = "RPI", y = "RUE")
 
-rpi_restrend_plot <- ggplot(trend_sample_subset, aes(x = slope, y = resid_slope)) +
+rpi_restrend_plot <- ggplot(trend_sample_subset, aes(x = rpi_slope, y = restrend_slope)) +
   geom_point(size = 0.5) +
+  geom_smooth(method = "lm", se = FALSE) +
   xlim(-0.03, 0.03) +
   # ylim(-0.2, 0.2) +
   geom_hline(yintercept = 0) +
@@ -959,6 +933,50 @@ rpi_restrend_plot <- ggplot(trend_sample_subset, aes(x = slope, y = resid_slope)
 
 rpi_rue_plot
 rpi_restrend_plot
+
+# Correlations within rainfall buckets (use whole dataset)
+
+slope_raster <- c(rpi_ts_trend$slope, rue_ts_trend$rue_slope, restrend$resid_slope, mean(ppt_all))
+names(slope_raster) <- c("rpi_slope", "rue_slope", "restrend_slope", "mean_ppt")
+
+slope_df <- as.data.frame(slope_raster, cells = TRUE, na.rm = TRUE)
+
+slope_df_binned <- slope_df %>%
+  mutate(ppt_bin = cut_width(mean_ppt, width = 200, boundary = 0)) %>%
+  group_by(ppt_bin) %>%
+  filter(n() >= 1000) %>%
+  ungroup()
+
+rpi_restrend_cor <-  slope_df_binned %>%
+  group_by(ppt_bin) %>%
+  summarise(rpi_rue_cor = cor(rpi_slope, rue_slope),
+            rpi_restrend_cor = cor(rpi_slope, restrend_slope))
+
+ppt_bin_sample <- slope_df_binned %>%
+  group_by(ppt_bin) %>%
+  slice_sample(n = 1000)
+
+rpi_rue_plot <- ggplot(ppt_bin_sample, aes(x = rpi_slope, y = rue_slope)) +
+  geom_point(size = 0.5, alpha = 0.5) +
+  geom_smooth(method = "lm", se = FALSE, lwd = 0.8, colour = "grey60") +
+  xlim(-0.03, 0.03) +
+  ylim(-0.2, 0.2) +
+  geom_hline(yintercept = 0) +
+  geom_vline(xintercept = 0) +
+  facet_wrap(~ppt_bin) +
+  theme_bw() +
+  labs(x = "RPI", y = "RUE")
+
+rpi_restrend_plot <- ggplot(ppt_bin_sample, aes(x = rpi_slope, y = restrend_slope)) +
+  geom_point(size = 0.5, alpha = 0.5) +
+  geom_smooth(method = "lm", se = FALSE, lwd = 0.8, colour = "grey60") +
+  xlim(-0.05, 0.05) +
+  ylim(-150, 150) +
+  geom_hline(yintercept = 0) +
+  geom_vline(xintercept = 0) +
+  facet_wrap(~ppt_bin) +
+  theme_bw() +
+  labs(x = "RPI", y = "RESTREND")
 
 ```
 
@@ -1057,4 +1075,155 @@ rue_resids <- actual_gpp_all - (rue_lm * ppt_all)
 
 
 ```
+
+
+
+```{r rpi_autocorrelation}
+
+rpi_detrended <- app(rpi_all, function(x) {
+  
+  if(any(is.na(x))) {
+    rep(NA, 19)
+  } else {
+    years <- 1:19
+    
+    trend <- lm(x ~ years)
+    
+    residuals(trend)
+    
+  }
+})
+
+calc_ac1 <- function(x) {
+  if(any(is.na(x))) {
+    NA
+  } else {
+    ac_all <- acf(x, lag.max = 2, plot = FALSE)
+    
+    ac_all$acf[2]
+  }
+}
+
+rpi_ac1 <- app(rpi_all, calc_ac1)
+rpi_ac1_detrended <- app(rpi_detrended, calc_ac1)
+
+# RESTREND??
+
+restrend_detrended <- app(restrend_residuals, function(x) {
+  
+  if(any(is.na(x))) {
+    rep(NA, 19)
+  } else {
+    years <- 1:19
+    
+    trend <- lm(x ~ years)
+    
+    residuals(trend)
+    
+  }
+})
+
+restrend_ac1 <- app(restrend_residuals, calc_ac1)
+restrend_ac1_detrended <- app(restrend_detrended, calc_ac1)
+
+# GPP only
+
+gpp_ac1 <- app(actual_gpp_all, calc_ac1)
+
+# RPI vs previous year's precipitation
+rpi_df <- as.data.frame(rpi_all, cells = TRUE, na.rm = TRUE)
+ppt_df <- as.data.frame(ppt_all, cells = TRUE, na.rm = TRUE)
+
+rpi_ppt_df <- left_join(rpi_df, ppt_df)
+
+rpi_ppt_pivot <- rpi_ppt_df %>%
+  pivot_longer(cols = starts_with(c("rpi", "precipitation"))) %>%
+  separate_wider_delim(cols = "name", delim = "_", names = c("index", "year")) %>%
+  mutate(year = as.numeric(year)) %>%
+  pivot_wider(id_cols = c(cell, year),
+              names_from = "index", values_from = "value")
+
+rpi_ppt_ac1 <- rpi_ppt_pivot %>%
+  group_by(cell) %>%
+  arrange(year, .by_group = TRUE) %>%
+  mutate(ppt_lag = lag(precipitation)) %>%
+  filter(year > 2001) %>%
+  summarise(cor = cor(rpi, ppt_lag))
+
+median(rpi_ppt_ac1$cor)
+
+```
+
+```{r palette_tester_array}
+
+# R-G palette reflects positive/negative trend
+# B reflects current value
+n <- 5
+
+r <- matrix(rep(1:n, n), nrow = n, byrow = FALSE)
+g <- n + 1 - r
+b <- matrix(rep(1:n, n), nrow = n, byrow = TRUE)
+
+a <- array(c(r,g,b), dim = c(n,n,3))
+R <- rast(a)
+
+labels <- c("R", "G", "B")
+names(R) <- labels
+
+tm_shape(R) + 
+  tm_rgb(
+    col = tm_mv(labels),
+    col.scale = tm_scale_rgb(maxValue = n)
+  )
+
+
+# Not quite. There's too much overlap.
+# How about reducing the overlap between R and G?
+
+n2 <- 2 * n - 1
+
+r2 <- matrix(
+  c(
+    rep(0, n * (n - 1)),
+    rep(1:n, each = n)
+  ),
+  nrow = n2,
+  byrow = TRUE
+)
+g2 <- matrix(
+  c(
+    rep(n:1, each = n),
+    rep(0, n * (n - 1))
+  ),
+  nrow = n2,
+  byrow = TRUE
+)
+b2 <- matrix(
+  rep(1:n, each = n2),
+  nrow = n2,
+  byrow = FALSE
+)
+
+a2 <- array(c(r2, g2, b2), dim = c(n2, n, 3))
+R2 <- rast(a2)
+
+names(R2) <- labels
+
+tm_shape(R2) + 
+  tm_rgb(
+    col = tm_mv(labels),
+    col.scale = tm_scale_rgb(maxValue = n)
+  )
+
+# I don't think this is clear enough. There's too much colour variation
+# and it's too hard to distinguish productivity levels in any given part
+# of the spectrum. I should use HSL as it's more akin to how humans perceive
+# colour.
+
+# For HSL, I need to use hue as the metric for trend, since saturation and
+# luminance don't have anything like a midpoint.
+
+
+```
+
 
