@@ -71,6 +71,9 @@ ppt_covariate_paths <- Sys.glob(here("data", "raw", "raster", "covariateMaps",
 ppt_covariates <- map(ppt_covariate_paths, rast)
 names(ppt_covariates) <- years
 
+# Reproject TWI to resolution and extent of other variables
+twi_reproj <- project(twi, dynamic_covariates[[1]])
+
 ```
 
 ``` {r process}
@@ -118,7 +121,7 @@ static_vars_rast <- static_covariates[[static_vars]]
 ppt_vars_crop <- crop(ppt_vars_mean, dynamic_vars_mean)
 static_vars_crop <- crop(static_vars_rast, dynamic_vars_mean)
 
-combined_rast <- c(dynamic_vars_mean, ppt_vars_crop, static_vars_crop)
+combined_rast <- c(dynamic_vars_mean, ppt_vars_crop, static_vars_crop, twi_reproj)
 
 # Convert to data.frame
 combined_vars_df <- as.data.frame(combined_rast, xy = TRUE, na.rm = TRUE)
@@ -141,7 +144,7 @@ of the quantile method and making it less likely that undegraed
 # Set up mlr3 tasks
   
 tsk_lgs <- combined_vars_df %>%
-  select(-x, -y) %>%
+  select(-x, -y, -GPP) %>%
   as_task_clust()
 
 # Function to implement k-means with specified k
@@ -154,7 +157,7 @@ fit_k_means <- function(task, k) {
                 predict_type = "partition",
                 centers = k,
                 algorithm = "Lloyd",
-                nstart = 10,
+                nstart = 5,
                 iter.max = 1000
   )
   
@@ -177,16 +180,16 @@ set.seed(999)
 
 tic()
 sample_points_clustered <- combined_vars_df %>%
-  mutate(clusters_k10 = fit_k_means(tsk_lgs, 10),
-         clusters_k20 = fit_k_means(tsk_lgs, 20),
+  mutate(clusters_k20 = fit_k_means(tsk_lgs, 20),
          clusters_k50 = fit_k_means(tsk_lgs, 50),
-         clusters_k100 = fit_k_means(tsk_lgs, 100)) %>%
+         clusters_k100 = fit_k_means(tsk_lgs, 100),
+         clusters_k200 = fit_k_means(tsk_lgs, 200)) %>%
   pivot_longer(cols = starts_with("clusters"),
               names_to = "k", values_to = "cluster") %>%
   mutate(k = substring(k, 11) %>% as.numeric())
 toc()
 
-write_rds(sample_points_clustered, here("data", "processed", "rds", "clusters_with_ppt.rds"))
+write_rds(sample_points_clustered, here("data", "processed", "rds", "clusters_with_ppt_fixed.rds"))
 
 ```
 
@@ -201,6 +204,8 @@ and for consistency with the RPI method.
 
 ```{r lgs}
 
+sample_points_clustered <- read_rds(here("data", "processed", "rds", "clusters_with_ppt.rds"))
+
 # 90th percentile for each cluster
 quantiles <- sample_points_clustered %>%
   group_by(cluster, k) %>%
@@ -213,7 +218,8 @@ lgs <- sample_points_quantiles %>%
   group_by(cluster, k) %>%
   mutate(lgs_abs = GPP - potential,
          lgs_ratio = GPP / potential,
-         lgs_scaled = (GPP - min(GPP)) / (potential - min(GPP))) %>%
+         lgs_scaled = (GPP - min(GPP)) / (potential - min(GPP)),
+         mean_gpp = mean(GPP)) %>%
   ungroup()
 
 hist(lgs$lgs_ratio, breaks = 100)
@@ -221,20 +227,24 @@ hist(lgs$lgs_scaled, breaks = 100)
 
 # Convert back to raster
 
-k_list <- c(10, 20, 50, 100)
+k_list <- c(20, 50, 100)
 
-lgs_rasters <- list(length = length(k_list))
-
-for (i in seq_along(k_list)) {
-  message("Processing for k = ", k_list[i])
-  lgs_k <- filter(lgs, k == k_list[i])
+for (i in k_list) {
+  message("Processing for k = ", i)
+  lgs_k <- filter(lgs, k == i)
   
   lgs_rast <- lgs_k %>%
-    select(x, y, cluster, GPP, potential, lgs_abs, lgs_ratio, lgs_scaled) %>%
-    rast(crs = crs(combined_rast), extent = ext(combined_rast))
+    select(x, y, cluster, GPP, mean_gpp, potential, lgs_abs, lgs_ratio, lgs_scaled) %>%
+    rast(crs = crs(dynamic_covariates[[1]]), extent = ext(dynamic_covariates[[1]]))
   
-  lgs_rasters[[i]] <- lgs_rast
+  filename <- paste0("lgs_", i, ".tif")
+  
+  writeRaster(lgs_rast,
+              here("data", "processed", "raster", "lgs", filename),
+              overwrite = TRUE)
 }
+
+
 
 ```
 
