@@ -30,9 +30,9 @@ library(tictoc)
 # Visualisation
 library(tmap)
 
-# Parallelisation
-nc <- availableCores() - 8
-plan(multisession, workers = nc)
+# # Parallelisation
+# nc <- availableCores() - 8
+# plan(multisession, workers = nc)
 
 ```
 
@@ -64,7 +64,7 @@ ppt_distribution <- st_read(here("data", "raw", "vector", "pptDistributionSample
 ```{r clean, include = FALSE}
 
 yearly_vars <- c("GPP", "precipitation", "tMean", "parMean", "potentialET",
-                 "meanPptDay", "sdii", "ugi")
+                 "meanPptDay", "intensity", "ugi")
 
 sample_points <- sample_points_raw %>%
   mutate(x = st_coordinates(geometry)[,1],
@@ -259,20 +259,20 @@ worried about perfection!
 ```{r rf_tuning_prep, include = FALSE}
 
 # Load feature sets and compare best performance
-spt_feature_set <- read_rds(here("results", "rds", "spt_features.rds"))
-nspt_feature_set <- read_rds(here("results", "rds", "nspt_features.rds"))
-spt_feature_select <- read_rds(here("results", "rds", "spt_feature_selector.rds"))
-nspt_feature_select <- read_rds(here("results", "rds", "nspt_feature_selector.rds"))
+spt_feature_set <- read_rds(here("results", "rds", "spt_features_1000.rds"))
+# nspt_feature_set <- read_rds(here("results", "rds", "nspt_features.rds"))
+spt_feature_select <- read_rds(here("results", "rds", "spt_feature_selector_1000.rds"))
+# nspt_feature_select <- read_rds(here("results", "rds", "nspt_feature_selector.rds"))
 
 spt_feature_set
-nspt_feature_set
+# nspt_feature_set
 
 # Create new tasks using features selected above
 task_gpp_spt <- task_gpp$clone()
 task_gpp_spt$select(unlist(spt_feature_set$features))
 
-task_gpp_nspt <- task_gpp$clone()
-task_gpp_nspt$select(unlist(nspt_feature_set$features))
+# task_gpp_nspt <- task_gpp$clone()
+# task_gpp_nspt$select(unlist(nspt_feature_set$features))
 
 # Define new learners for tuning
 
@@ -288,20 +288,20 @@ lrn_ranger_tuned_spt <- lrn(
   sample.fraction = to_tune(p_dbl(0.1, 0.9))
 )
 
-lrn_ranger_tuned_nspt <- lrn(
-  "regr.ranger", 
-  predict_type = "response",
-  quantreg = TRUE,
-  keep.inbag = TRUE,
-  importance = "permutation",
-  num.trees = 1001,
-  mtry.ratio = to_tune(p_dbl(0, 1)),
-  min.node.size = to_tune(p_int(200, 20000, logscale = TRUE)),
-  sample.fraction = to_tune(p_dbl(0.1, 0.9))
-)
+# lrn_ranger_tuned_nspt <- lrn(
+#   "regr.ranger", 
+#   predict_type = "response",
+#   quantreg = TRUE,
+#   keep.inbag = TRUE,
+#   importance = "permutation",
+#   num.trees = 1001,
+#   mtry.ratio = to_tune(p_dbl(0, 1)),
+#   min.node.size = to_tune(p_int(200, 20000, logscale = TRUE)),
+#   sample.fraction = to_tune(p_dbl(0.1, 0.9))
+# )
 
 set_threads(lrn_ranger_tuned_spt, 2)
-set_threads(lrn_ranger_tuned_nspt, 2)
+# set_threads(lrn_ranger_tuned_nspt, 2)
 
 # Define auto-tuner objects for each model
 
@@ -317,13 +317,13 @@ at_spt <- auto_tuner(
   term_evals = 25
 )
 
-at_nspt <- auto_tuner(
-  tuner = random_tuner,
-  learner = lrn_ranger_tuned_nspt,
-  resampling = nspt_cv_plan,
-  measure = perf_msr,
-  term_evals = 25
-)
+# at_nspt <- auto_tuner(
+#   tuner = random_tuner,
+#   learner = lrn_ranger_tuned_nspt,
+#   resampling = nspt_cv_plan,
+#   measure = perf_msr,
+#   term_evals = 25
+# )
 
 ```
 
@@ -366,17 +366,17 @@ Performance assessment of spatial and non-spatial models
 
 ```{r performance}
 
-rf_tuned_spt <- read_rds(here("results", "rds", "rf_tuned_spt.rds"))
-rf_tuned_nspt <- read_rds(here("results", "rds", "rf_tuned_nspt.rds"))
+rf_tuned_spt <- read_rds(here("results", "rds", "rf_tuned_spt_100.rds"))
+# rf_tuned_nspt <- read_rds(here("results", "rds", "rf_tuned_nspt.rds"))
 
 # Measures to evaluate model performance
 measures <- msrs(c("regr.mae", "regr.rmse", "regr.rsq"))
 
 rf_predictions_spt <- rf_tuned_spt$predict(task_gpp_spt)
-rf_predictions_nspt <- rf_tuned_nspt$predict(task_gpp_nspt)
+# rf_predictions_nspt <- rf_tuned_nspt$predict(task_gpp_nspt)
 
 rf_predictions_spt$score(measures)
-rf_predictions_nspt$score(measures)
+# rf_predictions_nspt$score(measures)
 
 # # Plot predicted vs true values
 # 
@@ -412,15 +412,26 @@ density_breaks <- c(1, 10, 100, 1000, 10000)
 density_plot <- ggplot(data_with_quantiles_spt, aes(x = quantile_pred, y = GPP)) +
   geom_hex(bins = 60) +
   scale_fill_viridis_c(direction = 1, trans = "log", breaks = density_breaks) +
-  geom_abline(slope = seq(0.2, 1, 0.2), intercept = 0, colour = "red", lwd = 0.2, linetype = "longdash") +
-  geom_abline(slope = 1, intercept = 0, colour = "red") +
+  geom_abline(slope = seq(0.2, 1, 0.2), intercept = 0, colour = "grey", lwd = 0.8, linetype = "longdash") +
+  geom_abline(slope = 1, intercept = 0, colour = "grey", lwd = 1.6) +
   theme_classic() +
-  theme(legend.position = c(0.1, 0.8), legend.key.height = unit(1.5, "cm")) +
-  xlim(0, 10) +
-  ylim(0, 10) +
+  theme(legend.position = c(0.18, 0.75), legend.key.height = unit(1.5, "cm"),
+        axis.title = element_text(size = 24),
+        axis.text = element_text(size = 16),
+        legend.title = element_text(size = 20),
+        legend.text = element_text(size = 16),
+        legend.background = element_rect(fill = "transparent")) +
+  xlim(-0.01, 15) +
+  ylim(-0.01, 15) +
   labs(x = expression(atop("Potential GPP", (kg~C~m^-2~yr^-1))),
        y = expression(atop("Actual GPP", (kg~C~m^-2~yr^-1))),
        fill = "Number of points")
+
+ggsave(
+  here("results", "figures", "rf_density_plot.png"),
+  density_plot,
+  width = 24, height = 24, units = "cm", dpi = 250
+)
 
 # ggplot(data_with_quantiles_nspt, aes(x = quantile_pred, y = GPP)) +
 #   geom_point(size = 0.1, alpha = 0.1) +
