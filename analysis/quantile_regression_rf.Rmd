@@ -31,8 +31,8 @@ library(tictoc)
 library(tmap)
 
 # # Parallelisation
-# nc <- availableCores() - 8
-# plan(multisession, workers = nc)
+nc <- availableCores() / 4
+plan(multisession, workers = nc)
 
 ```
 
@@ -262,9 +262,9 @@ worried about perfection!
 ```{r rf_tuning_prep, include = FALSE}
 
 # Load feature sets and compare best performance
-spt_feature_set <- read_rds(here("results", "rds", "spt_features_1000.rds"))
+spt_feature_set <- read_rds(here("results", "rds", "spt_features.rds"))
 # nspt_feature_set <- read_rds(here("results", "rds", "nspt_features.rds"))
-spt_feature_select <- read_rds(here("results", "rds", "spt_feature_selector_1000.rds"))
+spt_feature_select <- read_rds(here("results", "rds", "spt_feature_selector.rds"))
 # nspt_feature_select <- read_rds(here("results", "rds", "nspt_feature_selector.rds"))
 
 spt_feature_set
@@ -342,7 +342,7 @@ rf_tuned_spt <- at_spt$train(task_gpp_spt)
 toc()
 # beep(3)
 
-write_rds(rf_tuned_spt, here("results", "rds", "rf_tuned_spt_100.rds"))
+write_rds(rf_tuned_spt, here("results", "rds", "rf_tuned_spt2.rds"))
 
 # rm(rf_tuned_spt)
 # gc()
